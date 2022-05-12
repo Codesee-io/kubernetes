@@ -33,7 +33,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilversion "k8s.io/apimachinery/pkg/util/version"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	clientset "k8s.io/client-go/kubernetes"
@@ -41,15 +40,6 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2essh "k8s.io/kubernetes/test/e2e/framework/ssh"
-)
-
-// New local storage types to support local storage capacity isolation
-var localStorageCapacityIsolation featuregate.Feature = "LocalStorageCapacityIsolation"
-
-var (
-	downwardAPIHugePages featuregate.Feature = "DownwardAPIHugePages"
-	execProbeTimeout     featuregate.Feature = "ExecProbeTimeout"
-	csiMigration         featuregate.Feature = "CSIMigration"
 )
 
 func skipInternalf(caller int, format string, args ...interface{}) {
@@ -127,6 +117,7 @@ func pruneStack(skip int) string {
 // Skipf skips with information about why the test is being skipped.
 func Skipf(format string, args ...interface{}) {
 	skipInternalf(1, format, args...)
+	panic("unreachable")
 }
 
 // SkipUnlessAtLeast skips if the value is less than the minValue.
@@ -136,28 +127,47 @@ func SkipUnlessAtLeast(value int, minValue int, message string) {
 	}
 }
 
-// SkipUnlessLocalEphemeralStorageEnabled skips if the LocalStorageCapacityIsolation is not enabled.
-func SkipUnlessLocalEphemeralStorageEnabled() {
-	if !utilfeature.DefaultFeatureGate.Enabled(localStorageCapacityIsolation) {
-		skipInternalf(1, "Only supported when %v feature is enabled", localStorageCapacityIsolation)
+var featureGate featuregate.FeatureGate
+
+// InitFeatureGates must be called in test suites that have a --feature-gates parameter.
+// If not called, SkipUnlessFeatureGateEnabled and SkipIfFeatureGateEnabled will
+// record a test failure.
+func InitFeatureGates(defaults featuregate.FeatureGate, overrides map[string]bool) error {
+	clone := defaults.DeepCopy()
+	if err := clone.SetFromMap(overrides); err != nil {
+		return err
+	}
+	featureGate = clone
+	return nil
+}
+
+// SkipUnlessFeatureGateEnabled skips if the feature is disabled.
+//
+// Beware that this only works in test suites that have a --feature-gate
+// parameter and call InitFeatureGates. In test/e2e, the `Feature: XYZ` tag
+// has to be used instead and invocations have to make sure that they
+// only run tests that work with the given test cluster.
+func SkipUnlessFeatureGateEnabled(gate featuregate.Feature) {
+	if featureGate == nil {
+		framework.Failf("Feature gate checking is not enabled, don't use SkipUnlessFeatureGateEnabled(%v). Instead use the Feature tag.", gate)
+	}
+	if !featureGate.Enabled(gate) {
+		skipInternalf(1, "Only supported when %v feature is enabled", gate)
 	}
 }
 
-func SkipUnlessDownwardAPIHugePagesEnabled() {
-	if !utilfeature.DefaultFeatureGate.Enabled(downwardAPIHugePages) {
-		skipInternalf(1, "Only supported when %v feature is enabled", downwardAPIHugePages)
+// SkipIfFeatureGateEnabled skips if the feature is enabled.
+//
+// Beware that this only works in test suites that have a --feature-gate
+// parameter and call InitFeatureGates. In test/e2e, the `Feature: XYZ` tag
+// has to be used instead and invocations have to make sure that they
+// only run tests that work with the given test cluster.
+func SkipIfFeatureGateEnabled(gate featuregate.Feature) {
+	if featureGate == nil {
+		framework.Failf("Feature gate checking is not enabled, don't use SkipFeatureGateEnabled(%v). Instead use the Feature tag.", gate)
 	}
-}
-
-func SkipUnlessExecProbeTimeoutEnabled() {
-	if !utilfeature.DefaultFeatureGate.Enabled(execProbeTimeout) {
-		skipInternalf(1, "Only supported when %v feature is enabled", execProbeTimeout)
-	}
-}
-
-func SkipIfCSIMigrationEnabled() {
-	if utilfeature.DefaultFeatureGate.Enabled(csiMigration) {
-		skipInternalf(1, "Only supported when %v feature is disabled", csiMigration)
+	if featureGate.Enabled(gate) {
+		skipInternalf(1, "Only supported when %v feature is disabled", gate)
 	}
 }
 
@@ -291,16 +301,6 @@ func SkipIfAppArmorNotSupported() {
 	SkipUnlessNodeOSDistroIs(AppArmorDistros...)
 }
 
-// RunIfContainerRuntimeIs runs if the container runtime is included in the runtimes.
-func RunIfContainerRuntimeIs(runtimes ...string) {
-	for _, containerRuntime := range runtimes {
-		if containerRuntime == framework.TestContext.ContainerRuntime {
-			return
-		}
-	}
-	skipInternalf(1, "Skipped because container runtime %q is not in %s", framework.TestContext.ContainerRuntime, runtimes)
-}
-
 // RunIfSystemSpecNameIs runs if the system spec name is included in the names.
 func RunIfSystemSpecNameIs(names ...string) {
 	for _, name := range names {
@@ -330,5 +330,12 @@ func SkipUnlessComponentRunsAsPodsAndClientCanDeleteThem(componentName string, c
 	pod := pods.Items[0]
 	if err := c.CoreV1().Pods(ns).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{DryRun: []string{metav1.DryRunAll}}); err != nil {
 		skipInternalf(1, "Skipped because client failed to delete component:%s pod, err:%v", componentName, err)
+	}
+}
+
+// SkipIfIPv6 skips if the cluster IP family is IPv6 and the provider is included in the unsupportedProviders.
+func SkipIfIPv6(unsupportedProviders ...string) {
+	if framework.TestContext.ClusterIsIPv6() && framework.ProviderIs(unsupportedProviders...) {
+		skipInternalf(1, "Not supported for IPv6 clusters and providers %v (found %s)", unsupportedProviders, framework.TestContext.Provider)
 	}
 }

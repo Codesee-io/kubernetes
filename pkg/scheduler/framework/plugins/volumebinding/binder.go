@@ -25,7 +25,6 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	storagev1beta1 "k8s.io/api/storage/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -35,20 +34,17 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	storageinformers "k8s.io/client-go/informers/storage/v1"
-	storageinformersv1beta1 "k8s.io/client-go/informers/storage/v1beta1"
 	clientset "k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	storagelisters "k8s.io/client-go/listers/storage/v1"
-	storagelistersv1beta1 "k8s.io/client-go/listers/storage/v1beta1"
-	storagehelpers "k8s.io/component-helpers/storage/volume"
+	"k8s.io/component-helpers/storage/ephemeral"
+	"k8s.io/component-helpers/storage/volume"
 	csitrans "k8s.io/csi-translation-lib"
 	csiplugins "k8s.io/csi-translation-lib/plugins"
 	"k8s.io/klog/v2"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
-	pvutil "k8s.io/kubernetes/pkg/controller/volume/persistentvolume/util"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/volumebinding/metrics"
-	volumeutil "k8s.io/kubernetes/pkg/volume/util"
 )
 
 // ConflictReason is used for the special strings which explain why
@@ -69,8 +65,8 @@ const (
 	ErrReasonNodeConflict ConflictReason = "node(s) had volume node affinity conflict"
 	// ErrReasonNotEnoughSpace is used when a pod cannot start on a node because not enough storage space is available.
 	ErrReasonNotEnoughSpace = "node(s) did not have enough free storage"
-	// ErrReasonPVNotExist is used when a PVC can't find the bound persistent volumes"
-	ErrReasonPVNotExist = "pvc(s) bound to non-existent pv(s)"
+	// ErrReasonPVNotExist is used when a pod has one or more PVC(s) bound to non-existent persistent volume(s)"
+	ErrReasonPVNotExist = "node(s) unavailable due to one or more pvc(s) bound to non-existent pv(s)"
 )
 
 // BindingInfo holds a binding between PV and PVC.
@@ -208,9 +204,8 @@ type volumeBinder struct {
 
 	translator InTreeToCSITranslator
 
-	capacityCheckEnabled     bool
 	csiDriverLister          storagelisters.CSIDriverLister
-	csiStorageCapacityLister storagelistersv1beta1.CSIStorageCapacityLister
+	csiStorageCapacityLister storagelisters.CSIStorageCapacityLister
 }
 
 // CapacityCheck contains additional parameters for NewVolumeBinder that
@@ -218,12 +213,12 @@ type volumeBinder struct {
 // capacity is desired.
 type CapacityCheck struct {
 	CSIDriverInformer          storageinformers.CSIDriverInformer
-	CSIStorageCapacityInformer storageinformersv1beta1.CSIStorageCapacityInformer
+	CSIStorageCapacityInformer storageinformers.CSIStorageCapacityInformer
 }
 
 // NewVolumeBinder sets up all the caches needed for the scheduler to make volume binding decisions.
 //
-// capacityCheck determines whether storage capacity is checked (CSIStorageCapacity feature).
+// capacityCheck determines how storage capacity is checked (CSIStorageCapacity feature).
 func NewVolumeBinder(
 	kubeClient clientset.Interface,
 	podInformer coreinformers.PodInformer,
@@ -232,7 +227,7 @@ func NewVolumeBinder(
 	pvcInformer coreinformers.PersistentVolumeClaimInformer,
 	pvInformer coreinformers.PersistentVolumeInformer,
 	storageClassInformer storageinformers.StorageClassInformer,
-	capacityCheck *CapacityCheck,
+	capacityCheck CapacityCheck,
 	bindTimeout time.Duration) SchedulerVolumeBinder {
 	b := &volumeBinder{
 		kubeClient:    kubeClient,
@@ -246,11 +241,8 @@ func NewVolumeBinder(
 		translator:    csitrans.New(),
 	}
 
-	if capacityCheck != nil {
-		b.capacityCheckEnabled = true
-		b.csiDriverLister = capacityCheck.CSIDriverInformer.Lister()
-		b.csiStorageCapacityLister = capacityCheck.CSIStorageCapacityInformer.Lister()
-	}
+	b.csiDriverLister = capacityCheck.CSIDriverInformer.Lister()
+	b.csiStorageCapacityLister = capacityCheck.CSIStorageCapacityInformer.Lister()
 
 	return b
 }
@@ -260,10 +252,9 @@ func NewVolumeBinder(
 // returned.
 func (b *volumeBinder) FindPodVolumes(pod *v1.Pod, boundClaims, claimsToBind []*v1.PersistentVolumeClaim, node *v1.Node) (podVolumes *PodVolumes, reasons ConflictReasons, err error) {
 	podVolumes = &PodVolumes{}
-	podName := getPodName(pod)
 
 	// Warning: Below log needs high verbosity as it can be printed several times (#60933).
-	klog.V(5).Infof("FindPodVolumes for pod %q, node %q", podName, node.Name)
+	klog.V(5).InfoS("FindPodVolumes", "pod", klog.KObj(pod), "node", klog.KObj(node))
 
 	// Initialize to true for pods that don't have volumes. These
 	// booleans get translated into reason strings when the function
@@ -315,7 +306,7 @@ func (b *volumeBinder) FindPodVolumes(pod *v1.Pod, boundClaims, claimsToBind []*
 
 	// Check PV node affinity on bound volumes
 	if len(boundClaims) > 0 {
-		boundVolumesSatisfied, boundPVsFound, err = b.checkBoundClaims(boundClaims, node, podName)
+		boundVolumesSatisfied, boundPVsFound, err = b.checkBoundClaims(boundClaims, node, pod)
 		if err != nil {
 			return
 		}
@@ -330,7 +321,7 @@ func (b *volumeBinder) FindPodVolumes(pod *v1.Pod, boundClaims, claimsToBind []*
 
 		// Filter out claims to provision
 		for _, claim := range claimsToBind {
-			if selectedNode, ok := claim.Annotations[pvutil.AnnSelectedNode]; ok {
+			if selectedNode, ok := claim.Annotations[volume.AnnSelectedNode]; ok {
 				if selectedNode != node.Name {
 					// Fast path, skip unmatched node.
 					unboundVolumesSatisfied = false
@@ -371,9 +362,7 @@ func (b *volumeBinder) FindPodVolumes(pod *v1.Pod, boundClaims, claimsToBind []*
 // 2. Update the pvcCache with the new PVCs with annotations set
 // 3. Update PodVolumes again with cached API updates for PVs and PVCs.
 func (b *volumeBinder) AssumePodVolumes(assumedPod *v1.Pod, nodeName string, podVolumes *PodVolumes) (allFullyBound bool, err error) {
-	podName := getPodName(assumedPod)
-
-	klog.V(4).Infof("AssumePodVolumes for pod %q, node %q", podName, nodeName)
+	klog.V(4).InfoS("AssumePodVolumes", "pod", klog.KObj(assumedPod), "node", klog.KRef("", nodeName))
 	defer func() {
 		if err != nil {
 			metrics.VolumeSchedulingStageFailed.WithLabelValues("assume").Inc()
@@ -381,26 +370,27 @@ func (b *volumeBinder) AssumePodVolumes(assumedPod *v1.Pod, nodeName string, pod
 	}()
 
 	if allBound := b.arePodVolumesBound(assumedPod); allBound {
-		klog.V(4).Infof("AssumePodVolumes for pod %q, node %q: all PVCs bound and nothing to do", podName, nodeName)
+		klog.V(4).InfoS("AssumePodVolumes: all PVCs bound and nothing to do", "pod", klog.KObj(assumedPod), "node", klog.KRef("", nodeName))
 		return true, nil
 	}
 
 	// Assume PV
 	newBindings := []*BindingInfo{}
 	for _, binding := range podVolumes.StaticBindings {
-		newPV, dirty, err := pvutil.GetBindVolumeToClaim(binding.pv, binding.pvc)
-		klog.V(5).Infof("AssumePodVolumes: GetBindVolumeToClaim for pod %q, PV %q, PVC %q.  newPV %p, dirty %v, err: %v",
-			podName,
-			binding.pv.Name,
-			binding.pvc.Name,
-			newPV,
-			dirty,
-			err)
+		newPV, dirty, err := volume.GetBindVolumeToClaim(binding.pv, binding.pvc)
+		klog.V(5).InfoS("AssumePodVolumes: GetBindVolumeToClaim",
+			"pod", klog.KObj(assumedPod),
+			"PV", klog.KObj(binding.pv),
+			"PVC", klog.KObj(binding.pvc),
+			"newPV", klog.KObj(newPV),
+			"dirty", dirty,
+		)
 		if err != nil {
+			klog.ErrorS(err, "AssumePodVolumes: fail to GetBindVolumeToClaim")
 			b.revertAssumedPVs(newBindings)
 			return false, err
 		}
-		// TODO: can we assume everytime?
+		// TODO: can we assume every time?
 		if dirty {
 			err = b.pvCache.Assume(newPV)
 			if err != nil {
@@ -417,7 +407,7 @@ func (b *volumeBinder) AssumePodVolumes(assumedPod *v1.Pod, nodeName string, pod
 		// The claims from method args can be pointing to watcher cache. We must not
 		// modify these, therefore create a copy.
 		claimClone := claim.DeepCopy()
-		metav1.SetMetaDataAnnotation(&claimClone.ObjectMeta, pvutil.AnnSelectedNode, nodeName)
+		metav1.SetMetaDataAnnotation(&claimClone.ObjectMeta, volume.AnnSelectedNode, nodeName)
 		err = b.pvcCache.Assume(claimClone)
 		if err != nil {
 			b.revertAssumedPVs(newBindings)
@@ -443,8 +433,7 @@ func (b *volumeBinder) RevertAssumedPodVolumes(podVolumes *PodVolumes) {
 // makes the API update for those PVs/PVCs, and waits for the PVCs to be completely bound
 // by the PV controller.
 func (b *volumeBinder) BindPodVolumes(assumedPod *v1.Pod, podVolumes *PodVolumes) (err error) {
-	podName := getPodName(assumedPod)
-	klog.V(4).Infof("BindPodVolumes for pod %q, node %q", podName, assumedPod.Spec.NodeName)
+	klog.V(4).InfoS("BindPodVolumes", "pod", klog.KObj(assumedPod), "node", klog.KRef("", assumedPod.Spec.NodeName))
 
 	defer func() {
 		if err != nil {
@@ -456,7 +445,7 @@ func (b *volumeBinder) BindPodVolumes(assumedPod *v1.Pod, podVolumes *PodVolumes
 	claimsToProvision := podVolumes.DynamicProvisions
 
 	// Start API operations
-	err = b.bindAPIUpdate(podName, bindings, claimsToProvision)
+	err = b.bindAPIUpdate(assumedPod, bindings, claimsToProvision)
 	if err != nil {
 		return err
 	}
@@ -480,7 +469,8 @@ func getPVCName(pvc *v1.PersistentVolumeClaim) string {
 }
 
 // bindAPIUpdate makes the API update for those PVs/PVCs.
-func (b *volumeBinder) bindAPIUpdate(podName string, bindings []*BindingInfo, claimsToProvision []*v1.PersistentVolumeClaim) error {
+func (b *volumeBinder) bindAPIUpdate(pod *v1.Pod, bindings []*BindingInfo, claimsToProvision []*v1.PersistentVolumeClaim) error {
+	podName := getPodName(pod)
 	if bindings == nil {
 		return fmt.Errorf("failed to get cached bindings for pod %q", podName)
 	}
@@ -510,16 +500,15 @@ func (b *volumeBinder) bindAPIUpdate(podName string, bindings []*BindingInfo, cl
 	// Do the actual prebinding. Let the PV controller take care of the rest
 	// There is no API rollback if the actual binding fails
 	for _, binding = range bindings {
-		klog.V(5).Infof("bindAPIUpdate: Pod %q, binding PV %q to PVC %q", podName, binding.pv.Name, binding.pvc.Name)
+		klog.V(5).InfoS("bindAPIUpdate: binding PV to PVC", "pod", klog.KObj(pod), "PV", klog.KObj(binding.pv), "PVC", klog.KObj(binding.pvc))
 		// TODO: does it hurt if we make an api call and nothing needs to be updated?
-		claimKey := getPVCName(binding.pvc)
-		klog.V(2).Infof("claim %q bound to volume %q", claimKey, binding.pv.Name)
+		klog.V(2).InfoS("Claim bound to volume", "PVC", klog.KObj(binding.pvc), "PV", klog.KObj(binding.pv))
 		newPV, err := b.kubeClient.CoreV1().PersistentVolumes().Update(context.TODO(), binding.pv, metav1.UpdateOptions{})
 		if err != nil {
-			klog.V(4).Infof("updating PersistentVolume[%s]: binding to %q failed: %v", binding.pv.Name, claimKey, err)
+			klog.V(4).InfoS("Updating PersistentVolume: binding to claim failed", "PV", klog.KObj(binding.pv), "PVC", klog.KObj(binding.pvc), "err", err)
 			return err
 		}
-		klog.V(4).Infof("updating PersistentVolume[%s]: bound to %q", binding.pv.Name, claimKey)
+		klog.V(4).InfoS("Updating PersistentVolume: bound to claim", "PV", klog.KObj(binding.pv), "PVC", klog.KObj(binding.pvc))
 		// Save updated object from apiserver for later checking.
 		binding.pv = newPV
 		lastProcessedBinding++
@@ -528,7 +517,7 @@ func (b *volumeBinder) bindAPIUpdate(podName string, bindings []*BindingInfo, cl
 	// Update claims objects to trigger volume provisioning. Let the PV controller take care of the rest
 	// PV controller is expected to signal back by removing related annotations if actual provisioning fails
 	for i, claim = range claimsToProvision {
-		klog.V(5).Infof("bindAPIUpdate: Pod %q, PVC %q", podName, getPVCName(claim))
+		klog.V(5).InfoS("Updating claims objects to trigger volume provisioning", "pod", klog.KObj(pod), "PVC", klog.KObj(claim))
 		newClaim, err := b.kubeClient.CoreV1().PersistentVolumeClaims(claim.Namespace).Update(context.TODO(), claim, metav1.UpdateOptions{})
 		if err != nil {
 			return err
@@ -572,7 +561,7 @@ func (b *volumeBinder) checkBindings(pod *v1.Pod, bindings []*BindingInfo, claim
 	csiNode, err := b.csiNodeLister.Get(node.Name)
 	if err != nil {
 		// TODO: return the error once CSINode is created by default
-		klog.V(4).Infof("Could not get a CSINode object for the node %q: %v", node.Name, err)
+		klog.V(4).InfoS("Could not get a CSINode object for the node", "node", klog.KObj(node), "err", err)
 	}
 
 	// Check for any conditions that might require scheduling retry
@@ -584,7 +573,7 @@ func (b *volumeBinder) checkBindings(pod *v1.Pod, bindings []*BindingInfo, claim
 		if apierrors.IsNotFound(err) {
 			return false, fmt.Errorf("pod does not exist any more: %w", err)
 		}
-		klog.Errorf("failed to get pod %s/%s from the lister: %v", pod.Namespace, pod.Name, err)
+		klog.ErrorS(err, "Failed to get pod from the lister", "pod", klog.KObj(pod))
 	}
 
 	for _, binding := range bindings {
@@ -610,7 +599,7 @@ func (b *volumeBinder) checkBindings(pod *v1.Pod, bindings []*BindingInfo, claim
 		}
 
 		// Check PV's node affinity (the node might not have the proper label)
-		if err := volumeutil.CheckNodeAffinity(pv, node.Labels); err != nil {
+		if err := volume.CheckNodeAffinity(pv, node.Labels); err != nil {
 			return false, fmt.Errorf("pv %q node affinity doesn't match node %q: %w", pv.Name, node.Name, err)
 		}
 
@@ -641,7 +630,7 @@ func (b *volumeBinder) checkBindings(pod *v1.Pod, bindings []*BindingInfo, claim
 		if pvc.Annotations == nil {
 			return false, fmt.Errorf("selectedNode annotation reset for PVC %q", pvc.Name)
 		}
-		selectedNode := pvc.Annotations[pvutil.AnnSelectedNode]
+		selectedNode := pvc.Annotations[volume.AnnSelectedNode]
 		if selectedNode != pod.Spec.NodeName {
 			// If provisioner fails to provision a volume, selectedNode
 			// annotation will be removed to signal back to the scheduler to
@@ -668,7 +657,7 @@ func (b *volumeBinder) checkBindings(pod *v1.Pod, bindings []*BindingInfo, claim
 				return false, err
 			}
 
-			if err := volumeutil.CheckNodeAffinity(pv, node.Labels); err != nil {
+			if err := volume.CheckNodeAffinity(pv, node.Labels); err != nil {
 				return false, fmt.Errorf("pv %q node affinity doesn't match node %q: %w", pv.Name, node.Name, err)
 			}
 		}
@@ -680,35 +669,31 @@ func (b *volumeBinder) checkBindings(pod *v1.Pod, bindings []*BindingInfo, claim
 	}
 
 	// All pvs and pvcs that we operated on are bound
-	klog.V(4).Infof("All PVCs for pod %q are bound", podName)
+	klog.V(4).InfoS("All PVCs for pod are bound", "pod", klog.KObj(pod))
 	return true, nil
 }
 
 func (b *volumeBinder) isVolumeBound(pod *v1.Pod, vol *v1.Volume) (bound bool, pvc *v1.PersistentVolumeClaim, err error) {
 	pvcName := ""
-	ephemeral := false
+	isEphemeral := false
 	switch {
 	case vol.PersistentVolumeClaim != nil:
 		pvcName = vol.PersistentVolumeClaim.ClaimName
 	case vol.Ephemeral != nil:
-		if !utilfeature.DefaultFeatureGate.Enabled(features.GenericEphemeralVolume) {
-			return false, nil, fmt.Errorf(
-				"volume %s is a generic ephemeral volume, but that feature is disabled in kube-scheduler",
-				vol.Name,
-			)
-		}
 		// Generic ephemeral inline volumes also use a PVC,
 		// just with a computed name, and...
-		pvcName = pod.Name + "-" + vol.Name
-		ephemeral = true
+		pvcName = ephemeral.VolumeClaimName(pod, vol)
+		isEphemeral = true
 	default:
 		return true, nil, nil
 	}
 
 	bound, pvc, err = b.isPVCBound(pod.Namespace, pvcName)
 	// ... the PVC must be owned by the pod.
-	if ephemeral && err == nil && pvc != nil && !metav1.IsControlledBy(pvc, pod) {
-		return false, nil, fmt.Errorf("PVC %s/%s is not owned by pod", pod.Namespace, pvcName)
+	if isEphemeral && err == nil && pvc != nil {
+		if err := ephemeral.VolumeIsForPod(pod, pvc); err != nil {
+			return false, nil, err
+		}
 	}
 	return
 }
@@ -728,19 +713,19 @@ func (b *volumeBinder) isPVCBound(namespace, pvcName string) (bool, *v1.Persiste
 
 	fullyBound := b.isPVCFullyBound(pvc)
 	if fullyBound {
-		klog.V(5).Infof("PVC %q is fully bound to PV %q", pvcKey, pvc.Spec.VolumeName)
+		klog.V(5).InfoS("PVC is fully bound to PV", "PVC", klog.KObj(pvc), "PV", klog.KRef("", pvc.Spec.VolumeName))
 	} else {
 		if pvc.Spec.VolumeName != "" {
-			klog.V(5).Infof("PVC %q is not fully bound to PV %q", pvcKey, pvc.Spec.VolumeName)
+			klog.V(5).InfoS("PVC is not fully bound to PV", "PVC", klog.KObj(pvc), "PV", klog.KRef("", pvc.Spec.VolumeName))
 		} else {
-			klog.V(5).Infof("PVC %q is not bound", pvcKey)
+			klog.V(5).InfoS("PVC is not bound", "PVC", klog.KObj(pvc))
 		}
 	}
 	return fullyBound, pvc, nil
 }
 
 func (b *volumeBinder) isPVCFullyBound(pvc *v1.PersistentVolumeClaim) bool {
-	return pvc.Spec.VolumeName != "" && metav1.HasAnnotation(pvc.ObjectMeta, pvutil.AnnBindCompleted)
+	return pvc.Spec.VolumeName != "" && metav1.HasAnnotation(pvc.ObjectMeta, volume.AnnBindCompleted)
 }
 
 // arePodVolumesBound returns true if all volumes are fully bound
@@ -772,7 +757,7 @@ func (b *volumeBinder) GetPodVolumes(pod *v1.Pod) (boundClaims []*v1.PersistentV
 		if volumeBound {
 			boundClaims = append(boundClaims, pvc)
 		} else {
-			delayBindingMode, err := pvutil.IsDelayBindingMode(pvc, b.classLister)
+			delayBindingMode, err := volume.IsDelayBindingMode(pvc, b.classLister)
 			if err != nil {
 				return nil, nil, nil, err
 			}
@@ -790,11 +775,11 @@ func (b *volumeBinder) GetPodVolumes(pod *v1.Pod) (boundClaims []*v1.PersistentV
 	return boundClaims, unboundClaimsDelayBinding, unboundClaimsImmediate, nil
 }
 
-func (b *volumeBinder) checkBoundClaims(claims []*v1.PersistentVolumeClaim, node *v1.Node, podName string) (bool, bool, error) {
+func (b *volumeBinder) checkBoundClaims(claims []*v1.PersistentVolumeClaim, node *v1.Node, pod *v1.Pod) (bool, bool, error) {
 	csiNode, err := b.csiNodeLister.Get(node.Name)
 	if err != nil {
 		// TODO: return the error once CSINode is created by default
-		klog.V(4).Infof("Could not get a CSINode object for the node %q: %v", node.Name, err)
+		klog.V(4).InfoS("Could not get a CSINode object for the node", "node", klog.KObj(node), "err", err)
 	}
 
 	for _, pvc := range claims {
@@ -812,22 +797,21 @@ func (b *volumeBinder) checkBoundClaims(claims []*v1.PersistentVolumeClaim, node
 			return false, true, err
 		}
 
-		err = volumeutil.CheckNodeAffinity(pv, node.Labels)
+		err = volume.CheckNodeAffinity(pv, node.Labels)
 		if err != nil {
-			klog.V(4).Infof("PersistentVolume %q, Node %q mismatch for Pod %q: %v", pvName, node.Name, podName, err)
+			klog.V(4).InfoS("PersistentVolume and node mismatch for pod", "PV", klog.KRef("", pvName), "node", klog.KObj(node), "pod", klog.KObj(pod), "err", err)
 			return false, true, nil
 		}
-		klog.V(5).Infof("PersistentVolume %q, Node %q matches for Pod %q", pvName, node.Name, podName)
+		klog.V(5).InfoS("PersistentVolume and node matches for pod", "PV", klog.KRef("", pvName), "node", klog.KObj(node), "pod", klog.KObj(pod))
 	}
 
-	klog.V(4).Infof("All bound volumes for Pod %q match with Node %q", podName, node.Name)
+	klog.V(4).InfoS("All bound volumes for pod match with node", "pod", klog.KObj(pod), "node", klog.KObj(node))
 	return true, true, nil
 }
 
 // findMatchingVolumes tries to find matching volumes for given claims,
 // and return unbound claims for further provision.
 func (b *volumeBinder) findMatchingVolumes(pod *v1.Pod, claimsToBind []*v1.PersistentVolumeClaim, node *v1.Node) (foundMatches bool, bindings []*BindingInfo, unboundClaims []*v1.PersistentVolumeClaim, err error) {
-	podName := getPodName(pod)
 	// Sort all the claims by increasing size request to get the smallest fits
 	sort.Sort(byPVCSize(claimsToBind))
 
@@ -837,17 +821,16 @@ func (b *volumeBinder) findMatchingVolumes(pod *v1.Pod, claimsToBind []*v1.Persi
 
 	for _, pvc := range claimsToBind {
 		// Get storage class name from each PVC
-		storageClassName := storagehelpers.GetPersistentVolumeClaimClass(pvc)
+		storageClassName := volume.GetPersistentVolumeClaimClass(pvc)
 		allPVs := b.pvCache.ListPVs(storageClassName)
-		pvcName := getPVCName(pvc)
 
 		// Find a matching PV
-		pv, err := pvutil.FindMatchingVolume(pvc, allPVs, node, chosenPVs, true)
+		pv, err := volume.FindMatchingVolume(pvc, allPVs, node, chosenPVs, true)
 		if err != nil {
 			return false, nil, nil, err
 		}
 		if pv == nil {
-			klog.V(4).Infof("No matching volumes for Pod %q, PVC %q on node %q", podName, pvcName, node.Name)
+			klog.V(4).InfoS("No matching volumes for pod", "pod", klog.KObj(pod), "PVC", klog.KObj(pvc), "node", klog.KObj(node))
 			unboundClaims = append(unboundClaims, pvc)
 			foundMatches = false
 			continue
@@ -856,11 +839,11 @@ func (b *volumeBinder) findMatchingVolumes(pod *v1.Pod, claimsToBind []*v1.Persi
 		// matching PV needs to be excluded so we don't select it again
 		chosenPVs[pv.Name] = pv
 		bindings = append(bindings, &BindingInfo{pv: pv, pvc: pvc})
-		klog.V(5).Infof("Found matching PV %q for PVC %q on node %q for pod %q", pv.Name, pvcName, node.Name, podName)
+		klog.V(5).InfoS("Found matching PV for PVC for pod", "PV", klog.KObj(pv), "PVC", klog.KObj(pvc), "node", klog.KObj(node), "pod", klog.KObj(pod))
 	}
 
 	if foundMatches {
-		klog.V(4).Infof("Found matching volumes for pod %q on node %q", podName, node.Name)
+		klog.V(4).InfoS("Found matching volumes for pod", "pod", klog.KObj(pod), "node", klog.KObj(node))
 	}
 
 	return
@@ -870,14 +853,13 @@ func (b *volumeBinder) findMatchingVolumes(pod *v1.Pod, claimsToBind []*v1.Persi
 // findMatchingVolumes, and do not have matching volumes for binding), and return true
 // if all of the claims are eligible for dynamic provision.
 func (b *volumeBinder) checkVolumeProvisions(pod *v1.Pod, claimsToProvision []*v1.PersistentVolumeClaim, node *v1.Node) (provisionSatisfied, sufficientStorage bool, dynamicProvisions []*v1.PersistentVolumeClaim, err error) {
-	podName := getPodName(pod)
 	dynamicProvisions = []*v1.PersistentVolumeClaim{}
 
 	// We return early with provisionedClaims == nil if a check
 	// fails or we encounter an error.
 	for _, claim := range claimsToProvision {
 		pvcName := getPVCName(claim)
-		className := storagehelpers.GetPersistentVolumeClaimClass(claim)
+		className := volume.GetPersistentVolumeClaimClass(claim)
 		if className == "" {
 			return false, false, nil, fmt.Errorf("no class for claim %q", pvcName)
 		}
@@ -887,14 +869,14 @@ func (b *volumeBinder) checkVolumeProvisions(pod *v1.Pod, claimsToProvision []*v
 			return false, false, nil, fmt.Errorf("failed to find storage class %q", className)
 		}
 		provisioner := class.Provisioner
-		if provisioner == "" || provisioner == pvutil.NotSupportedProvisioner {
-			klog.V(4).Infof("storage class %q of claim %q does not support dynamic provisioning", className, pvcName)
+		if provisioner == "" || provisioner == volume.NotSupportedProvisioner {
+			klog.V(4).InfoS("Storage class of claim does not support dynamic provisioning", "storageClassName", className, "PVC", klog.KObj(claim))
 			return false, true, nil, nil
 		}
 
 		// Check if the node can satisfy the topology requirement in the class
 		if !v1helper.MatchTopologySelectorTerms(class.AllowedTopologies, labels.Set(node.Labels)) {
-			klog.V(4).Infof("Node %q cannot satisfy provisioning topology requirements of claim %q", node.Name, pvcName)
+			klog.V(4).InfoS("Node cannot satisfy provisioning topology requirements of claim", "node", klog.KObj(node), "PVC", klog.KObj(claim))
 			return false, true, nil, nil
 		}
 
@@ -911,7 +893,7 @@ func (b *volumeBinder) checkVolumeProvisions(pod *v1.Pod, claimsToProvision []*v
 		dynamicProvisions = append(dynamicProvisions, claim)
 
 	}
-	klog.V(4).Infof("Provisioning for %d claims of pod %q that has no matching volumes on node %q ...", len(claimsToProvision), podName, node.Name)
+	klog.V(4).InfoS("Provisioning for claims of pod that has no matching volumes...", "claimCount", len(claimsToProvision), "pod", klog.KObj(pod), "node", klog.KObj(node))
 
 	return true, true, dynamicProvisions, nil
 }
@@ -931,12 +913,6 @@ func (b *volumeBinder) revertAssumedPVCs(claims []*v1.PersistentVolumeClaim) {
 // hasEnoughCapacity checks whether the provisioner has enough capacity left for a new volume of the given size
 // that is available from the node.
 func (b *volumeBinder) hasEnoughCapacity(provisioner string, claim *v1.PersistentVolumeClaim, storageClass *storagev1.StorageClass, node *v1.Node) (bool, error) {
-	// This is an optional feature. If disabled, we assume that
-	// there is enough storage.
-	if !b.capacityCheckEnabled {
-		return true, nil
-	}
-
 	quantity, ok := claim.Spec.Resources.Requests[v1.ResourceStorage]
 	if !ok {
 		// No capacity to check for.
@@ -977,12 +953,12 @@ func (b *volumeBinder) hasEnoughCapacity(provisioner string, claim *v1.Persisten
 
 	// TODO (?): this doesn't give any information about which pools where considered and why
 	// they had to be rejected. Log that above? But that might be a lot of log output...
-	klog.V(4).Infof("Node %q has no accessible CSIStorageCapacity with enough capacity for PVC %s/%s of size %d and storage class %q",
-		node.Name, claim.Namespace, claim.Name, sizeInBytes, storageClass.Name)
+	klog.V(4).InfoS("Node has no accessible CSIStorageCapacity with enough capacity for PVC",
+		"node", klog.KObj(node), "PVC", klog.KObj(claim), "size", sizeInBytes, "storageClass", klog.KObj(storageClass))
 	return false, nil
 }
 
-func capacitySufficient(capacity *storagev1beta1.CSIStorageCapacity, sizeInBytes int64) bool {
+func capacitySufficient(capacity *storagev1.CSIStorageCapacity, sizeInBytes int64) bool {
 	limit := capacity.Capacity
 	if capacity.MaximumVolumeSize != nil {
 		// Prefer MaximumVolumeSize if available, it is more precise.
@@ -991,7 +967,7 @@ func capacitySufficient(capacity *storagev1beta1.CSIStorageCapacity, sizeInBytes
 	return limit != nil && limit.Value() >= sizeInBytes
 }
 
-func (b *volumeBinder) nodeHasAccess(node *v1.Node, capacity *storagev1beta1.CSIStorageCapacity) bool {
+func (b *volumeBinder) nodeHasAccess(node *v1.Node, capacity *storagev1.CSIStorageCapacity) bool {
 	if capacity.NodeTopology == nil {
 		// Unavailable
 		return false
@@ -999,8 +975,7 @@ func (b *volumeBinder) nodeHasAccess(node *v1.Node, capacity *storagev1beta1.CSI
 	// Only matching by label is supported.
 	selector, err := metav1.LabelSelectorAsSelector(capacity.NodeTopology)
 	if err != nil {
-		// This should never happen because NodeTopology must be valid.
-		klog.Errorf("unexpected error converting %+v to a label selector: %v", capacity.NodeTopology, err)
+		klog.ErrorS(err, "Unexpected error converting to a label selector", "nodeTopology", capacity.NodeTopology)
 		return false
 	}
 	return selector.Matches(labels.Set(node.Labels))
@@ -1023,7 +998,7 @@ func (a byPVCSize) Less(i, j int) bool {
 	return iSize.Cmp(jSize) == -1
 }
 
-// isCSIMigrationOnForPlugin checks if CSI migrartion is enabled for a given plugin.
+// isCSIMigrationOnForPlugin checks if CSI migration is enabled for a given plugin.
 func isCSIMigrationOnForPlugin(pluginName string) bool {
 	switch pluginName {
 	case csiplugins.AWSEBSInTreePluginName:
@@ -1033,7 +1008,11 @@ func isCSIMigrationOnForPlugin(pluginName string) bool {
 	case csiplugins.AzureDiskInTreePluginName:
 		return utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationAzureDisk)
 	case csiplugins.CinderInTreePluginName:
-		return utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationOpenStack)
+		return true
+	case csiplugins.PortworxVolumePluginName:
+		return utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationPortworx)
+	case csiplugins.RBDVolumePluginName:
+		return utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationRBD)
 	}
 	return false
 }

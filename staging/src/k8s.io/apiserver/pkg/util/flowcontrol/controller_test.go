@@ -28,7 +28,6 @@ import (
 
 	flowcontrol "k8s.io/api/flowcontrol/v1beta2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	fcboot "k8s.io/apiserver/pkg/apis/flowcontrol/bootstrap"
@@ -41,6 +40,7 @@ import (
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	fcclient "k8s.io/client-go/kubernetes/typed/flowcontrol/v1beta2"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 )
 
 // Some tests print a lot of debug logs which slows down tests considerably,
@@ -105,7 +105,7 @@ type ctlrTestRequest struct {
 	descr1, descr2 interface{}
 }
 
-func (cts *ctlrTestState) BeginConstruction(qc fq.QueuingConfig, ip metrics.TimedObserverPair) (fq.QueueSetCompleter, error) {
+func (cts *ctlrTestState) BeginConstruction(qc fq.QueuingConfig, rip metrics.RatioedChangeObserverPair, eso metrics.RatioedChangeObserver) (fq.QueueSetCompleter, error) {
 	return ctlrTestQueueSetCompleter{cts, nil, qc}, nil
 }
 
@@ -261,7 +261,8 @@ func TestConfigConsumer(t *testing.T) {
 				FlowcontrolClient:      flowcontrolClient,
 				ServerConcurrencyLimit: 100,         // server concurrency limit
 				RequestWaitLimit:       time.Minute, // request wait limit
-				ObsPairGenerator:       metrics.PriorityLevelConcurrencyObserverPairGenerator,
+				ReqsObsPairGenerator:   metrics.PriorityLevelConcurrencyObserverPairGenerator,
+				ExecSeatsObsGenerator:  metrics.PriorityLevelExecutionSeatsObserverGenerator,
 				QueueSetFactory:        cts,
 			})
 			cts.cfgCtlr = ctlr
@@ -392,7 +393,8 @@ func TestAPFControllerWithGracefulShutdown(t *testing.T) {
 		FlowcontrolClient:      flowcontrolClient,
 		ServerConcurrencyLimit: 100,
 		RequestWaitLimit:       time.Minute,
-		ObsPairGenerator:       metrics.PriorityLevelConcurrencyObserverPairGenerator,
+		ReqsObsPairGenerator:   metrics.PriorityLevelConcurrencyObserverPairGenerator,
+		ExecSeatsObsGenerator:  metrics.PriorityLevelExecutionSeatsObserverGenerator,
 		QueueSetFactory:        cts,
 	})
 
@@ -473,6 +475,8 @@ func checkNewFS(cts *ctlrTestState, rng *rand.Rand, trialName string, ftr *fsTes
 								t.Errorf("Fail at %s/%s: expected=%v, actual=%v", trialName, fs.Name, fs.Spec.PriorityLevelConfiguration.Name, matchPL.Name)
 							}
 						}
+					}, func() fcrequest.WorkEstimate {
+						return fcrequest.WorkEstimate{InitialSeats: 1}
 					}, func(inQueue bool) {
 					}, func() {
 						startWG.Done()

@@ -28,6 +28,7 @@ import (
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
@@ -35,6 +36,7 @@ import (
 
 var _ = SIGDescribe("Container Lifecycle Hook", func() {
 	f := framework.NewDefaultFramework("container-lifecycle-hook")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
 	var podClient *framework.PodClient
 	const (
 		podCheckInterval     = 1 * time.Second
@@ -94,7 +96,7 @@ var _ = SIGDescribe("Container Lifecycle Hook", func() {
 		*/
 		framework.ConformanceIt("should execute poststart exec hook properly [NodeConformance]", func() {
 			lifecycle := &v1.Lifecycle{
-				PostStart: &v1.Handler{
+				PostStart: &v1.LifecycleHandler{
 					Exec: &v1.ExecAction{
 						Command: []string{"sh", "-c", "curl http://" + targetURL + ":8080/echo?msg=poststart"},
 					},
@@ -111,7 +113,7 @@ var _ = SIGDescribe("Container Lifecycle Hook", func() {
 		*/
 		framework.ConformanceIt("should execute prestop exec hook properly [NodeConformance]", func() {
 			lifecycle := &v1.Lifecycle{
-				PreStop: &v1.Handler{
+				PreStop: &v1.LifecycleHandler{
 					Exec: &v1.ExecAction{
 						Command: []string{"sh", "-c", "curl http://" + targetURL + ":8080/echo?msg=prestop"},
 					},
@@ -127,7 +129,7 @@ var _ = SIGDescribe("Container Lifecycle Hook", func() {
 		*/
 		framework.ConformanceIt("should execute poststart http hook properly [NodeConformance]", func() {
 			lifecycle := &v1.Lifecycle{
-				PostStart: &v1.Handler{
+				PostStart: &v1.LifecycleHandler{
 					HTTPGet: &v1.HTTPGetAction{
 						Path: "/echo?msg=poststart",
 						Host: targetIP,
@@ -149,7 +151,7 @@ var _ = SIGDescribe("Container Lifecycle Hook", func() {
 		*/
 		framework.ConformanceIt("should execute prestop http hook properly [NodeConformance]", func() {
 			lifecycle := &v1.Lifecycle{
-				PreStop: &v1.Handler{
+				PreStop: &v1.LifecycleHandler{
 					HTTPGet: &v1.HTTPGetAction{
 						Path: "/echo?msg=prestop",
 						Host: targetIP,

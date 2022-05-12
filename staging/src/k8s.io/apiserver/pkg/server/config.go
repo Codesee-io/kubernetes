@@ -35,7 +35,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilwaitgroup "k8s.io/apimachinery/pkg/util/waitgroup"
 	"k8s.io/apimachinery/pkg/version"
@@ -73,6 +72,7 @@ import (
 	"k8s.io/klog/v2"
 	openapicommon "k8s.io/kube-openapi/pkg/common"
 	"k8s.io/kube-openapi/pkg/validation/spec"
+	"k8s.io/utils/clock"
 	utilsnet "k8s.io/utils/net"
 
 	// install apis
@@ -171,6 +171,8 @@ type Config struct {
 	Serializer runtime.NegotiatedSerializer
 	// OpenAPIConfig will be used in generating OpenAPI spec. This is nil by default. Use DefaultOpenAPIConfig for "working" defaults.
 	OpenAPIConfig *openapicommon.Config
+	// OpenAPIV3Config will be used in generating OpenAPI V3 spec. This is nil by default. Use DefaultOpenAPIV3Config for "working" defaults.
+	OpenAPIV3Config *openapicommon.Config
 	// SkipOpenAPIInstallation avoids installing the OpenAPI handler if set to true.
 	SkipOpenAPIInstallation bool
 
@@ -359,6 +361,9 @@ func NewConfig(codecs serializer.CodecFactory) *Config {
 		// A request body might be encoded in json, and is converted to
 		// proto when persisted in etcd, so we allow 2x as the largest request
 		// body size to be accepted and decoded in a write request.
+		// If this constant is changed, maxRequestSizeBytes in apiextensions-apiserver/third_party/forked/celopenapi/model/schemas.go
+		// should be changed to reflect the new value, if the two haven't
+		// been wired together already somehow.
 		MaxRequestBodyBytes: int64(3 * 1024 * 1024),
 
 		// Default to treating watch as a long-running operation
@@ -379,6 +384,7 @@ func NewRecommendedConfig(codecs serializer.CodecFactory) *RecommendedConfig {
 	}
 }
 
+// DefaultOpenAPIConfig provides the default OpenAPIConfig used to build the OpenAPI V2 spec
 func DefaultOpenAPIConfig(getDefinitions openapicommon.GetOpenAPIDefinitions, defNamer *apiopenapi.DefinitionNamer) *openapicommon.Config {
 	return &openapicommon.Config{
 		ProtocolList:   []string{"https"},
@@ -397,6 +403,17 @@ func DefaultOpenAPIConfig(getDefinitions openapicommon.GetOpenAPIDefinitions, de
 		GetDefinitionName:     defNamer.GetDefinitionName,
 		GetDefinitions:        getDefinitions,
 	}
+}
+
+// DefaultOpenAPIV3Config provides the default OpenAPIV3Config used to build the OpenAPI V3 spec
+func DefaultOpenAPIV3Config(getDefinitions openapicommon.GetOpenAPIDefinitions, defNamer *apiopenapi.DefinitionNamer) *openapicommon.Config {
+	defaultConfig := DefaultOpenAPIConfig(getDefinitions, defNamer)
+	defaultConfig.Definitions = getDefinitions(func(name string) spec.Ref {
+		defName, _ := defaultConfig.GetDefinitionName(name)
+		return spec.MustCreateRef("#/components/schemas/" + openapicommon.EscapeJsonPointer(defName))
+	})
+
+	return defaultConfig
 }
 
 func (c *AuthenticationInfo) ApplyClientCert(clientCA dynamiccertificates.CAContentProvider, servingInfo *SecureServingInfo) error {
@@ -472,6 +489,50 @@ func (c *Config) AddPostStartHookOrDie(name string, hook PostStartHookFunc) {
 	}
 }
 
+func completeOpenAPI(config *openapicommon.Config, version *version.Info) {
+	if config == nil {
+		return
+	}
+	if config.SecurityDefinitions != nil {
+		// Setup OpenAPI security: all APIs will have the same authentication for now.
+		config.DefaultSecurity = []map[string][]string{}
+		keys := []string{}
+		for k := range *config.SecurityDefinitions {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			config.DefaultSecurity = append(config.DefaultSecurity, map[string][]string{k: {}})
+		}
+		if config.CommonResponses == nil {
+			config.CommonResponses = map[int]spec.Response{}
+		}
+		if _, exists := config.CommonResponses[http.StatusUnauthorized]; !exists {
+			config.CommonResponses[http.StatusUnauthorized] = spec.Response{
+				ResponseProps: spec.ResponseProps{
+					Description: "Unauthorized",
+				},
+			}
+		}
+	}
+	// make sure we populate info, and info.version, if not manually set
+	if config.Info == nil {
+		config.Info = &spec.Info{}
+	}
+	if config.Info.Version == "" {
+		if version != nil {
+			config.Info.Version = strings.Split(version.String(), "-")[0]
+		} else {
+			config.Info.Version = "unversioned"
+		}
+	}
+}
+
+// StopNotify returns a lifecycle signal of genericapiserver shutting down.
+func (c *Config) StopNotify() <-chan struct{} {
+	return c.lifecycleSignals.ShutdownInitiated.Signaled()
+}
+
 // Complete fills in any fields not set that are required to have valid data and can be derived
 // from other fields. If you're going to `ApplyOptions`, do that first. It's mutating the receiver.
 func (c *Config) Complete(informers informers.SharedInformerFactory) CompletedConfig {
@@ -491,42 +552,9 @@ func (c *Config) Complete(informers informers.SharedInformerFactory) CompletedCo
 		c.ExternalAddress = net.JoinHostPort(c.ExternalAddress, strconv.Itoa(port))
 	}
 
-	if c.OpenAPIConfig != nil {
-		if c.OpenAPIConfig.SecurityDefinitions != nil {
-			// Setup OpenAPI security: all APIs will have the same authentication for now.
-			c.OpenAPIConfig.DefaultSecurity = []map[string][]string{}
-			keys := []string{}
-			for k := range *c.OpenAPIConfig.SecurityDefinitions {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
-				c.OpenAPIConfig.DefaultSecurity = append(c.OpenAPIConfig.DefaultSecurity, map[string][]string{k: {}})
-			}
-			if c.OpenAPIConfig.CommonResponses == nil {
-				c.OpenAPIConfig.CommonResponses = map[int]spec.Response{}
-			}
-			if _, exists := c.OpenAPIConfig.CommonResponses[http.StatusUnauthorized]; !exists {
-				c.OpenAPIConfig.CommonResponses[http.StatusUnauthorized] = spec.Response{
-					ResponseProps: spec.ResponseProps{
-						Description: "Unauthorized",
-					},
-				}
-			}
-		}
+	completeOpenAPI(c.OpenAPIConfig, c.Version)
+	completeOpenAPI(c.OpenAPIV3Config, c.Version)
 
-		// make sure we populate info, and info.version, if not manually set
-		if c.OpenAPIConfig.Info == nil {
-			c.OpenAPIConfig.Info = &spec.Info{}
-		}
-		if c.OpenAPIConfig.Info.Version == "" {
-			if c.Version != nil {
-				c.OpenAPIConfig.Info.Version = strings.Split(c.Version.String(), "-")[0]
-			} else {
-				c.OpenAPIConfig.Info.Version = "unversioned"
-			}
-		}
-	}
 	if c.DiscoveryAddresses == nil {
 		c.DiscoveryAddresses = discovery.DefaultAddresses{DefaultAddress: c.ExternalAddress}
 	}
@@ -578,6 +606,7 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 	handlerChainBuilder := func(handler http.Handler) http.Handler {
 		return c.BuildHandlerChainFunc(handler, c.Config)
 	}
+
 	apiServerHandler := NewAPIServerHandler(name, c.Serializer, handlerChainBuilder, delegationTarget.UnprotectedHandler())
 
 	s := &GenericAPIServer{
@@ -591,6 +620,9 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 		delegationTarget:           delegationTarget,
 		EquivalentResourceRegistry: c.EquivalentResourceRegistry,
 		HandlerChainWaitGroup:      c.HandlerChainWaitGroup,
+		Handler:                    apiServerHandler,
+
+		listedPathProvider: apiServerHandler,
 
 		minRequestTimeout:     time.Duration(c.MinRequestTimeout) * time.Second,
 		ShutdownTimeout:       c.RequestTimeout,
@@ -598,11 +630,8 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 		SecureServingInfo:     c.SecureServing,
 		ExternalAddress:       c.ExternalAddress,
 
-		Handler: apiServerHandler,
-
-		listedPathProvider: apiServerHandler,
-
 		openAPIConfig:           c.OpenAPIConfig,
+		openAPIV3Config:         c.OpenAPIV3Config,
 		skipOpenAPIInstallation: c.SkipOpenAPIInstallation,
 
 		postStartHooks:         map[string]postStartHookEntry{},
@@ -626,6 +655,8 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 		StorageVersionManager: c.StorageVersionManager,
 
 		Version: c.Version,
+
+		muxAndDiscoveryCompleteSignals: map[string]<-chan struct{}{},
 	}
 
 	for {
@@ -653,6 +684,13 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 	// add poststarthooks that were preconfigured.  Using the add method will give us an error if the same name has already been registered.
 	for name, preconfiguredPostStartHook := range c.PostStartHooks {
 		if err := s.AddPostStartHook(name, preconfiguredPostStartHook.hook); err != nil {
+			return nil, err
+		}
+	}
+
+	// register mux signals from the delegated server
+	for k, v := range delegationTarget.MuxAndDiscoveryCompleteSignals() {
+		if err := s.RegisterMuxAndDiscoveryCompleteSignal(k, v); err != nil {
 			return nil, err
 		}
 	}
@@ -758,7 +796,7 @@ func DefaultBuildHandlerChain(apiHandler http.Handler, c *Config) http.Handler {
 	handler = filterlatency.TrackStarted(handler, "authorization")
 
 	if c.FlowControl != nil {
-		requestWorkEstimator := flowcontrolrequest.NewWorkEstimator(c.StorageObjectCountTracker.Get)
+		requestWorkEstimator := flowcontrolrequest.NewWorkEstimator(c.StorageObjectCountTracker.Get, c.FlowControl.GetInterestedWatchCount)
 		handler = filterlatency.TrackCompleted(handler)
 		handler = genericfilters.WithPriorityAndFairness(handler, c.LongRunningFunc, c.FlowControl, requestWorkEstimator)
 		handler = filterlatency.TrackStarted(handler, "priorityandfairness")
@@ -805,8 +843,10 @@ func DefaultBuildHandlerChain(apiHandler http.Handler, c *Config) http.Handler {
 	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.APIServerTracing) {
 		handler = genericapifilters.WithTracing(handler, c.TracerProvider)
 	}
+	handler = genericapifilters.WithLatencyTrackers(handler)
 	handler = genericapifilters.WithRequestInfo(handler, c.RequestInfoResolver)
 	handler = genericapifilters.WithRequestReceivedTimestamp(handler)
+	handler = genericapifilters.WithMuxAndDiscoveryComplete(handler, c.lifecycleSignals.MuxAndDiscoveryComplete.Signaled())
 	handler = genericfilters.WithPanicRecovery(handler, c.RequestInfoResolver)
 	handler = genericapifilters.WithAuditID(handler)
 	return handler

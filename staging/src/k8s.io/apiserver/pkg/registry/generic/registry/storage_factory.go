@@ -49,8 +49,9 @@ func StorageWithCacher() generic.StorageDecorator {
 		if err != nil {
 			return s, d, err
 		}
-		if klog.V(5).Enabled() {
-			klog.InfoS("Storage caching is enabled", objectTypeToArgs(newFunc())...)
+		if klogV := klog.V(5); klogV.Enabled() {
+			//nolint:logcheck // It complains about the key/value pairs because it cannot check them.
+			klogV.InfoS("Storage caching is enabled", objectTypeToArgs(newFunc())...)
 		}
 
 		cacherConfig := cacherstorage.Config{
@@ -69,15 +70,13 @@ func StorageWithCacher() generic.StorageDecorator {
 		if err != nil {
 			return nil, func() {}, err
 		}
+		var once sync.Once
 		destroyFunc := func() {
-			cacher.Stop()
-			d()
+			once.Do(func() {
+				cacher.Stop()
+				d()
+			})
 		}
-
-		// TODO : Remove RegisterStorageCleanup below when PR
-		// https://github.com/kubernetes/kubernetes/pull/50690
-		// merges as that shuts down storage properly
-		RegisterStorageCleanup(destroyFunc)
 
 		return cacher, destroyFunc, nil
 	}
@@ -93,46 +92,4 @@ func objectTypeToArgs(obj runtime.Object) []interface{} {
 
 	// otherwise just return the type
 	return []interface{}{"type", fmt.Sprintf("%T", obj)}
-}
-
-// TODO : Remove all the code below when PR
-// https://github.com/kubernetes/kubernetes/pull/50690
-// merges as that shuts down storage properly
-// HACK ALERT : Track the destroy methods to call them
-// from the test harness. TrackStorageCleanup will be called
-// only from the test harness, so Register/Cleanup will be
-// no-op at runtime.
-
-var cleanupLock sync.Mutex
-var cleanup []func() = nil
-
-func TrackStorageCleanup() {
-	cleanupLock.Lock()
-	defer cleanupLock.Unlock()
-
-	if cleanup != nil {
-		panic("Conflicting storage tracking")
-	}
-	cleanup = make([]func(), 0)
-}
-
-func RegisterStorageCleanup(fn func()) {
-	cleanupLock.Lock()
-	defer cleanupLock.Unlock()
-
-	if cleanup == nil {
-		return
-	}
-	cleanup = append(cleanup, fn)
-}
-
-func CleanupStorage() {
-	cleanupLock.Lock()
-	old := cleanup
-	cleanup = nil
-	cleanupLock.Unlock()
-
-	for _, d := range old {
-		d()
-	}
 }

@@ -299,7 +299,7 @@ func (o *BuiltInAuthenticationOptions) AddFlags(fs *pflag.FlagSet) {
 
 		fs.StringSliceVar(&o.OIDC.SigningAlgs, "oidc-signing-algs", []string{"RS256"}, ""+
 			"Comma-separated list of allowed JOSE asymmetric signing algorithms. JWTs with a "+
-			"'alg' header value not in this list will be rejected. "+
+			"supported 'alg' header values are: RS256, RS384, RS512, ES256, ES384, ES512, PS256, PS384, PS512. "+
 			"Values are defined by RFC 7518 https://tools.ietf.org/html/rfc7518#section-3.1.")
 
 		fs.Var(cliflag.NewMapStringStringNoSplit(&o.OIDC.RequiredClaims), "oidc-required-claim", ""+
@@ -318,7 +318,7 @@ func (o *BuiltInAuthenticationOptions) AddFlags(fs *pflag.FlagSet) {
 			"ServiceAccount tokens. The specified file can contain multiple keys, and the flag can "+
 			"be specified multiple times with different files. If unspecified, "+
 			"--tls-private-key-file is used. Must be specified when "+
-			"--service-account-signing-key is provided")
+			"--service-account-signing-key-file is provided")
 
 		fs.BoolVar(&o.ServiceAccounts.Lookup, "service-account-lookup", o.ServiceAccounts.Lookup,
 			"If true, validate ServiceAccount tokens exist in etcd as part of authentication.")
@@ -454,7 +454,7 @@ func (o *BuiltInAuthenticationOptions) ToAuthenticationConfig() (kubeauthenticat
 }
 
 // ApplyTo requires already applied OpenAPIConfig and EgressSelector if present.
-func (o *BuiltInAuthenticationOptions) ApplyTo(authInfo *genericapiserver.AuthenticationInfo, secureServing *genericapiserver.SecureServingInfo, egressSelector *egressselector.EgressSelector, openAPIConfig *openapicommon.Config, extclient kubernetes.Interface, versionedInformer informers.SharedInformerFactory) error {
+func (o *BuiltInAuthenticationOptions) ApplyTo(authInfo *genericapiserver.AuthenticationInfo, secureServing *genericapiserver.SecureServingInfo, egressSelector *egressselector.EgressSelector, openAPIConfig *openapicommon.Config, openAPIV3Config *openapicommon.Config, extclient kubernetes.Interface, versionedInformer informers.SharedInformerFactory) error {
 	if o == nil {
 		return nil
 	}
@@ -504,6 +504,9 @@ func (o *BuiltInAuthenticationOptions) ApplyTo(authInfo *genericapiserver.Authen
 	}
 
 	authInfo.Authenticator, openAPIConfig.SecurityDefinitions, err = authenticatorConfig.New()
+	if openAPIV3Config != nil {
+		openAPIV3Config.SecurityDefinitions = openAPIConfig.SecurityDefinitions
+	}
 	if err != nil {
 		return err
 	}

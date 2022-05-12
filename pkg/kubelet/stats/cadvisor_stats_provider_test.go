@@ -19,6 +19,7 @@ package stats
 import (
 	"testing"
 
+	gomock "github.com/golang/mock/gomock"
 	cadvisorapiv2 "github.com/google/cadvisor/info/v2"
 	"github.com/stretchr/testify/assert"
 
@@ -29,12 +30,15 @@ import (
 	cadvisortest "k8s.io/kubernetes/pkg/kubelet/cadvisor/testing"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	containertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
+	kubecontainertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
+	"k8s.io/kubernetes/pkg/kubelet/kuberuntime"
 	"k8s.io/kubernetes/pkg/kubelet/leaky"
 	serverstats "k8s.io/kubernetes/pkg/kubelet/server/stats"
 	statustest "k8s.io/kubernetes/pkg/kubelet/status/testing"
+	"k8s.io/kubernetes/pkg/volume"
 )
 
-func TestRemoveTerminatedContainerInfo(t *testing.T) {
+func TestFilterTerminatedContainerInfoAndAssembleByPodCgroupKey(t *testing.T) {
 	const (
 		seedPastPod0Infra      = 1000
 		seedPastPod0Container0 = 2000
@@ -63,10 +67,16 @@ func TestRemoveTerminatedContainerInfo(t *testing.T) {
 		"/pod0-i":  getTestContainerInfo(seedPod0Infra, pName0, namespace, leaky.PodInfraContainerName),
 		"/pod0-c0": getTestContainerInfo(seedPod0Container0, pName0, namespace, cName00),
 	}
-	output := removeTerminatedContainerInfo(infos)
-	assert.Len(t, output, 2)
+	filteredInfos, allInfos := filterTerminatedContainerInfoAndAssembleByPodCgroupKey(infos)
+	assert.Len(t, filteredInfos, 2)
+	assert.Len(t, allInfos, 6)
 	for _, c := range []string{"/pod0-i", "/pod0-c0"} {
-		if _, found := output[c]; !found {
+		if _, found := filteredInfos[c]; !found {
+			t.Errorf("%q is expected to be in the output\n", c)
+		}
+	}
+	for _, c := range []string{"pod0-i-terminated-1", "pod0-c0-terminated-1", "pod0-i-terminated-2", "pod0-c0-terminated-2", "pod0-i", "pod0-c0"} {
+		if _, found := allInfos[c]; !found {
 			t.Errorf("%q is expected to be in the output\n", c)
 		}
 	}
@@ -202,15 +212,16 @@ func TestCadvisorListPodStats(t *testing.T) {
 		Recursive: true,
 	}
 
-	mockCadvisor := new(cadvisortest.Mock)
-	mockCadvisor.
-		On("ContainerInfoV2", "/", options).Return(infos, nil).
-		On("RootFsInfo").Return(rootfs, nil).
-		On("ImagesFsInfo").Return(imagefs, nil)
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
 
-	mockRuntime := new(containertest.Mock)
-	mockRuntime.
-		On("ImageStats").Return(&kubecontainer.ImageStats{TotalStorageBytes: 123}, nil)
+	mockCadvisor := cadvisortest.NewMockInterface(mockCtrl)
+	mockCadvisor.EXPECT().ContainerInfoV2("/", options).Return(infos, nil)
+	mockCadvisor.EXPECT().RootFsInfo().Return(rootfs, nil)
+	mockCadvisor.EXPECT().ImagesFsInfo().Return(imagefs, nil)
+
+	mockRuntime := containertest.NewMockRuntime(mockCtrl)
+	mockRuntime.EXPECT().ImageStats().Return(&kubecontainer.ImageStats{TotalStorageBytes: 123}, nil).AnyTimes()
 
 	ephemeralVolumes := []statsapi.VolumeStats{getPodVolumeStats(seedEphemeralVolume1, "ephemeralVolume1"),
 		getPodVolumeStats(seedEphemeralVolume2, "ephemeralVolume2")}
@@ -224,11 +235,11 @@ func TestCadvisorListPodStats(t *testing.T) {
 	p1Time := metav1.Now()
 	p2Time := metav1.Now()
 	p3Time := metav1.Now()
-	mockStatus := new(statustest.MockStatusProvider)
-	mockStatus.On("GetPodStatus", types.UID("UID"+pName0)).Return(v1.PodStatus{StartTime: &p0Time}, true)
-	mockStatus.On("GetPodStatus", types.UID("UID"+pName1)).Return(v1.PodStatus{StartTime: &p1Time}, true)
-	mockStatus.On("GetPodStatus", types.UID("UID"+pName2)).Return(v1.PodStatus{StartTime: &p2Time}, true)
-	mockStatus.On("GetPodStatus", types.UID("UID"+pName3)).Return(v1.PodStatus{StartTime: &p3Time}, true)
+	mockStatus := statustest.NewMockPodStatusProvider(mockCtrl)
+	mockStatus.EXPECT().GetPodStatus(types.UID("UID"+pName0)).Return(v1.PodStatus{StartTime: &p0Time}, true)
+	mockStatus.EXPECT().GetPodStatus(types.UID("UID"+pName1)).Return(v1.PodStatus{StartTime: &p1Time}, true)
+	mockStatus.EXPECT().GetPodStatus(types.UID("UID"+pName2)).Return(v1.PodStatus{StartTime: &p2Time}, true)
+	mockStatus.EXPECT().GetPodStatus(types.UID("UID"+pName3)).Return(v1.PodStatus{StartTime: &p3Time}, true)
 
 	resourceAnalyzer := &fakeResourceAnalyzer{podVolumeStats: volumeStats}
 
@@ -262,7 +273,7 @@ func TestCadvisorListPodStats(t *testing.T) {
 
 	assert.EqualValues(t, p0Time.Unix(), ps.StartTime.Time.Unix())
 	checkNetworkStats(t, "Pod0", seedPod0Infra, ps.Network)
-	checkEphemeralStats(t, "Pod0", []int{seedPod0Container0, seedPod0Container1}, []int{seedEphemeralVolume1, seedEphemeralVolume2}, ps.EphemeralStorage)
+	checkEphemeralStats(t, "Pod0", []int{seedPod0Container0, seedPod0Container1}, []int{seedEphemeralVolume1, seedEphemeralVolume2}, nil, ps.EphemeralStorage)
 	if ps.CPU != nil {
 		checkCPUStats(t, "Pod0", seedPod0Infra, ps.CPU)
 	}
@@ -385,9 +396,11 @@ func TestCadvisorListPodCPUAndMemoryStats(t *testing.T) {
 		Recursive: true,
 	}
 
-	mockCadvisor := new(cadvisortest.Mock)
-	mockCadvisor.
-		On("ContainerInfoV2", "/", options).Return(infos, nil)
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+
+	mockCadvisor := cadvisortest.NewMockInterface(mockCtrl)
+	mockCadvisor.EXPECT().ContainerInfoV2("/", options).Return(infos, nil)
 
 	ephemeralVolumes := []statsapi.VolumeStats{getPodVolumeStats(seedEphemeralVolume1, "ephemeralVolume1"),
 		getPodVolumeStats(seedEphemeralVolume2, "ephemeralVolume2")}
@@ -473,18 +486,20 @@ func TestCadvisorListPodCPUAndMemoryStats(t *testing.T) {
 }
 
 func TestCadvisorImagesFsStats(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
 	var (
 		assert       = assert.New(t)
-		mockCadvisor = new(cadvisortest.Mock)
-		mockRuntime  = new(containertest.Mock)
+		mockCadvisor = cadvisortest.NewMockInterface(mockCtrl)
+		mockRuntime  = containertest.NewMockRuntime(mockCtrl)
 
 		seed        = 1000
 		imageFsInfo = getTestFsInfo(seed)
 		imageStats  = &kubecontainer.ImageStats{TotalStorageBytes: 100}
 	)
 
-	mockCadvisor.On("ImagesFsInfo").Return(imageFsInfo, nil)
-	mockRuntime.On("ImageStats").Return(imageStats, nil)
+	mockCadvisor.EXPECT().ImagesFsInfo().Return(imageFsInfo, nil)
+	mockRuntime.EXPECT().ImageStats().Return(imageStats, nil)
 
 	provider := newCadvisorStatsProvider(mockCadvisor, &fakeResourceAnalyzer{}, mockRuntime, nil, NewFakeHostStatsProvider())
 	stats, err := provider.ImageFsStats()
@@ -497,6 +512,107 @@ func TestCadvisorImagesFsStats(t *testing.T) {
 	assert.Equal(imageFsInfo.InodesFree, stats.InodesFree)
 	assert.Equal(imageFsInfo.Inodes, stats.Inodes)
 	assert.Equal(*imageFsInfo.Inodes-*imageFsInfo.InodesFree, *stats.InodesUsed)
+}
 
-	mockCadvisor.AssertExpectations(t)
+func TestCadvisorListPodStatsWhenContainerLogFound(t *testing.T) {
+	const (
+		namespace0 = "test0"
+	)
+	const (
+		seedRoot           = 0
+		seedRuntime        = 100
+		seedKubelet        = 200
+		seedMisc           = 300
+		seedPod0Infra      = 1000
+		seedPod0Container0 = 0
+		seedPod0Container1 = 0
+	)
+	const (
+		pName0 = "pod0"
+	)
+	const (
+		cName00 = "c0"
+		cName01 = "c1"
+	)
+	const (
+		rootfsCapacity    = uint64(10000000)
+		rootfsAvailable   = uint64(5000000)
+		rootfsInodesFree  = uint64(1000)
+		rootfsInodes      = uint64(2000)
+		imagefsCapacity   = uint64(20000000)
+		imagefsAvailable  = uint64(8000000)
+		imagefsInodesFree = uint64(2000)
+		imagefsInodes     = uint64(4000)
+	)
+
+	prf0 := statsapi.PodReference{Name: pName0, Namespace: namespace0, UID: "UID" + pName0}
+	infos := map[string]cadvisorapiv2.ContainerInfo{
+		"/":              getTestContainerInfo(seedRoot, "", "", ""),
+		"/docker-daemon": getTestContainerInfo(seedRuntime, "", "", ""),
+		"/kubelet":       getTestContainerInfo(seedKubelet, "", "", ""),
+		"/system":        getTestContainerInfo(seedMisc, "", "", ""),
+		// Pod0 - Namespace0
+		"/pod0-i":  getTestContainerInfo(seedPod0Infra, pName0, namespace0, leaky.PodInfraContainerName),
+		"/pod0-c0": getTestContainerInfo(seedPod0Container0, pName0, namespace0, cName00),
+		"/pod0-c1": getTestContainerInfo(seedPod0Container1, pName0, namespace0, cName01),
+	}
+
+	containerLogStats0 := makeFakeLogStats(0)
+	containerLogStats1 := makeFakeLogStats(0)
+	fakeStats := map[string]*volume.Metrics{
+		kuberuntime.BuildContainerLogsDirectory(prf0.Namespace, prf0.Name, types.UID(prf0.UID), cName00): containerLogStats0,
+		kuberuntime.BuildContainerLogsDirectory(prf0.Namespace, prf0.Name, types.UID(prf0.UID), cName01): containerLogStats1,
+	}
+	fakeStatsSlice := []*volume.Metrics{containerLogStats0, containerLogStats1}
+	fakeOS := &kubecontainertest.FakeOS{}
+
+	freeRootfsInodes := rootfsInodesFree
+	totalRootfsInodes := rootfsInodes
+	rootfs := cadvisorapiv2.FsInfo{
+		Capacity:   rootfsCapacity,
+		Available:  rootfsAvailable,
+		InodesFree: &freeRootfsInodes,
+		Inodes:     &totalRootfsInodes,
+	}
+
+	freeImagefsInodes := imagefsInodesFree
+	totalImagefsInodes := imagefsInodes
+	imagefs := cadvisorapiv2.FsInfo{
+		Capacity:   imagefsCapacity,
+		Available:  imagefsAvailable,
+		InodesFree: &freeImagefsInodes,
+		Inodes:     &totalImagefsInodes,
+	}
+
+	options := cadvisorapiv2.RequestOptions{
+		IdType:    cadvisorapiv2.TypeName,
+		Count:     2,
+		Recursive: true,
+	}
+
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+
+	mockCadvisor := cadvisortest.NewMockInterface(mockCtrl)
+	mockCadvisor.EXPECT().ContainerInfoV2("/", options).Return(infos, nil)
+	mockCadvisor.EXPECT().RootFsInfo().Return(rootfs, nil)
+	mockCadvisor.EXPECT().ImagesFsInfo().Return(imagefs, nil)
+
+	mockRuntime := containertest.NewMockRuntime(mockCtrl)
+	mockRuntime.EXPECT().ImageStats().Return(&kubecontainer.ImageStats{TotalStorageBytes: 123}, nil).AnyTimes()
+
+	volumeStats := serverstats.PodVolumeStats{}
+	p0Time := metav1.Now()
+	mockStatus := statustest.NewMockPodStatusProvider(mockCtrl)
+	mockStatus.EXPECT().GetPodStatus(types.UID("UID"+pName0)).Return(v1.PodStatus{StartTime: &p0Time}, true)
+
+	resourceAnalyzer := &fakeResourceAnalyzer{podVolumeStats: volumeStats}
+
+	p := NewCadvisorStatsProvider(mockCadvisor, resourceAnalyzer, nil, nil, mockRuntime, mockStatus, NewFakeHostStatsProviderWithData(fakeStats, fakeOS))
+	pods, err := p.ListPodStats()
+	assert.NoError(t, err)
+
+	assert.Equal(t, 1, len(pods))
+	// Validate Pod0 Results
+	checkEphemeralStats(t, "Pod0", []int{seedPod0Container0, seedPod0Container1}, nil, fakeStatsSlice, pods[0].EphemeralStorage)
 }

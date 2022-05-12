@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"runtime"
 	"sync/atomic"
+	"time"
 
 	flowcontrol "k8s.io/api/flowcontrol/v1beta2"
 	apitypes "k8s.io/apimachinery/pkg/types"
@@ -100,7 +101,7 @@ func WithPriorityAndFairness(
 		}
 
 		var classification *PriorityAndFairnessClassification
-		note := func(fs *flowcontrol.FlowSchema, pl *flowcontrol.PriorityLevelConfiguration, flowDistinguisher string) {
+		noteFn := func(fs *flowcontrol.FlowSchema, pl *flowcontrol.PriorityLevelConfiguration, flowDistinguisher string) {
 			classification = &PriorityAndFairnessClassification{
 				FlowSchemaName:    fs.Name,
 				FlowSchemaUID:     fs.UID,
@@ -109,7 +110,30 @@ func WithPriorityAndFairness(
 
 			httplog.AddKeyValue(ctx, "apf_pl", truncateLogField(pl.Name))
 			httplog.AddKeyValue(ctx, "apf_fs", truncateLogField(fs.Name))
-			httplog.AddKeyValue(ctx, "apf_fd", truncateLogField(flowDistinguisher))
+		}
+		// estimateWork is called, if at all, after noteFn
+		estimateWork := func() flowcontrolrequest.WorkEstimate {
+			if classification == nil {
+				// workEstimator is being invoked before classification of
+				// the request has completed, we should never be here though.
+				klog.ErrorS(fmt.Errorf("workEstimator is being invoked before classification of the request has completed"),
+					"Using empty FlowSchema and PriorityLevelConfiguration name", "verb", r.Method, "URI", r.RequestURI)
+
+				return workEstimator(r, "", "")
+			}
+
+			workEstimate := workEstimator(r, classification.FlowSchemaName, classification.PriorityLevelName)
+
+			fcmetrics.ObserveWorkEstimatedSeats(classification.PriorityLevelName, classification.FlowSchemaName, workEstimate.MaxSeats())
+			// nolint:logcheck // Not using the result of klog.V
+			// inside the if branch is okay, we just use it to
+			// determine whether the additional information should
+			// be added.
+			if klog.V(4).Enabled() {
+				httplog.AddKeyValue(ctx, "apf_iseats", workEstimate.InitialSeats)
+				httplog.AddKeyValue(ctx, "apf_fseats", workEstimate.FinalSeats)
+			}
+			return workEstimate
 		}
 
 		var served bool
@@ -136,13 +160,9 @@ func WithPriorityAndFairness(
 			}
 		}
 
-		// find the estimated amount of work of the request
-		// TODO: Estimate cost should also take fcIfc.GetWatchCount(requestInfo) as a parameter.
-		workEstimate := workEstimator.EstimateWork(r)
 		digest := utilflowcontrol.RequestDigest{
-			RequestInfo:  requestInfo,
-			User:         user,
-			WorkEstimate: workEstimate,
+			RequestInfo: requestInfo,
+			User:        user,
 		}
 
 		if isWatchRequest {
@@ -176,12 +196,16 @@ func WithPriorityAndFairness(
 			}()
 
 			execute := func() {
+				startedAt := time.Now()
+				defer func() {
+					httplog.AddKeyValue(ctx, "apf_init_latency", time.Since(startedAt))
+				}()
 				noteExecutingDelta(1)
 				defer noteExecutingDelta(-1)
 				served = true
 				setResponseHeaders(classification, w)
 
-				forgetWatch = fcIfc.RegisterWatch(requestInfo)
+				forgetWatch = fcIfc.RegisterWatch(r)
 
 				// Notify the main thread that we're ready to start the watch.
 				close(shouldStartWatchCh)
@@ -233,7 +257,7 @@ func WithPriorityAndFairness(
 				// Note that Handle will return irrespective of whether the request
 				// executes or is rejected. In the latter case, the function will return
 				// without calling the passed `execute` function.
-				fcIfc.Handle(handleCtx, digest, note, queueNote, execute)
+				fcIfc.Handle(handleCtx, digest, noteFn, estimateWork, queueNote, execute)
 			}()
 
 			select {
@@ -264,17 +288,13 @@ func WithPriorityAndFairness(
 				handler.ServeHTTP(w, r)
 			}
 
-			fcIfc.Handle(ctx, digest, note, queueNote, execute)
+			fcIfc.Handle(ctx, digest, noteFn, estimateWork, queueNote, execute)
 		}
 
 		if !served {
 			setResponseHeaders(classification, w)
 
-			if isMutatingRequest {
-				epmetrics.DroppedRequests.WithContext(ctx).WithLabelValues(epmetrics.MutatingKind).Inc()
-			} else {
-				epmetrics.DroppedRequests.WithContext(ctx).WithLabelValues(epmetrics.ReadOnlyKind).Inc()
-			}
+			epmetrics.RecordDroppedRequest(r, requestInfo, epmetrics.APIServerComponent, isMutatingRequest)
 			epmetrics.RecordRequestTermination(r, requestInfo, epmetrics.APIServerComponent, http.StatusTooManyRequests)
 			tooManyRequests(r, w)
 		}

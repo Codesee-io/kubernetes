@@ -49,6 +49,7 @@ import (
 	e2evolume "k8s.io/kubernetes/test/e2e/framework/volume"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 type localTestConfig struct {
@@ -149,6 +150,7 @@ var (
 
 var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 	f := framework.NewDefaultFramework("persistent-local-volumes-test")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	var (
 		config *localTestConfig
@@ -463,7 +465,7 @@ var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 			for _, localVolumes := range allLocalVolumes {
 				for _, localVolume := range localVolumes {
 					pvConfig := makeLocalPVConfig(config, localVolume)
-					localVolume.pv, err = e2epv.CreatePV(config.client, e2epv.MakePersistentVolume(pvConfig))
+					localVolume.pv, err = e2epv.CreatePV(config.client, f.Timeouts, e2epv.MakePersistentVolume(pvConfig))
 					framework.ExpectNoError(err)
 				}
 			}
@@ -505,7 +507,7 @@ var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 								err = config.client.CoreV1().PersistentVolumes().Delete(context.TODO(), pv.Name, metav1.DeleteOptions{})
 								framework.ExpectNoError(err)
 								pvConfig := makeLocalPVConfig(config, localVolume)
-								localVolume.pv, err = e2epv.CreatePV(config.client, e2epv.MakePersistentVolume(pvConfig))
+								localVolume.pv, err = e2epv.CreatePV(config.client, f.Timeouts, e2epv.MakePersistentVolume(pvConfig))
 								framework.ExpectNoError(err)
 							}
 						}
@@ -637,7 +639,7 @@ var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 			}
 			pvConfig := makeLocalPVConfig(config, localVolume)
 			var err error
-			pv, err = e2epv.CreatePV(config.client, e2epv.MakePersistentVolume(pvConfig))
+			pv, err = e2epv.CreatePV(config.client, f.Timeouts, e2epv.MakePersistentVolume(pvConfig))
 			framework.ExpectNoError(err)
 		})
 
@@ -936,7 +938,7 @@ func createLocalPVCsPVs(config *localTestConfig, volumes []*localTestVolume, mod
 		pvcConfig := makeLocalPVCConfig(config, volume.localVolumeType)
 		pvConfig := makeLocalPVConfig(config, volume)
 
-		volume.pv, volume.pvc, err = e2epv.CreatePVPVC(config.client, pvConfig, pvcConfig, config.ns, false)
+		volume.pv, volume.pvc, err = e2epv.CreatePVPVC(config.client, config.timeouts, pvConfig, pvcConfig, config.ns, false)
 		framework.ExpectNoError(err)
 	}
 

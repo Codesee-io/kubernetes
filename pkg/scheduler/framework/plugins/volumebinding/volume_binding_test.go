@@ -260,7 +260,24 @@ func TestVolumeBinding(t *testing.T) {
 				podVolumesByNode: map[string]*PodVolumes{},
 			},
 			wantFilterStatus: []*framework.Status{
-				framework.NewStatus(framework.UnschedulableAndUnresolvable, `pvc(s) bound to non-existent pv(s)`),
+				framework.NewStatus(framework.UnschedulableAndUnresolvable, `node(s) unavailable due to one or more pvc(s) bound to non-existent pv(s)`),
+			},
+			wantScores: []int64{
+				0,
+			},
+		},
+		{
+			name: "pv not found claim lost",
+			pod:  makePod("pod-a").withPVCVolume("pvc-a", "").Pod,
+			nodes: []*v1.Node{
+				makeNode("node-a").Node,
+			},
+			pvcs: []*v1.PersistentVolumeClaim{
+				makePVC("pvc-a", waitSC.Name).withBoundPV("pv-a").withPhase(v1.ClaimLost).PersistentVolumeClaim,
+			},
+			wantPreFilterStatus: framework.NewStatus(framework.UnschedulableAndUnresolvable, `persistentvolumeclaim "pvc-a" bound to non-existent persistentvolume "pv-a"`),
+			wantFilterStatus: []*framework.Status{
+				nil,
 			},
 			wantScores: []int64{
 				0,
@@ -636,7 +653,7 @@ func TestVolumeBinding(t *testing.T) {
 			state := framework.NewCycleState()
 
 			t.Logf("Verify: call PreFilter and check status")
-			gotPreFilterStatus := p.PreFilter(ctx, state, item.pod)
+			_, gotPreFilterStatus := p.PreFilter(ctx, state, item.pod)
 			if !reflect.DeepEqual(gotPreFilterStatus, item.wantPreFilterStatus) {
 				t.Errorf("filter prefilter status does not match: %v, want: %v", gotPreFilterStatus, item.wantPreFilterStatus)
 			}

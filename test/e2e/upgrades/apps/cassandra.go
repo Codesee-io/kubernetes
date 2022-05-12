@@ -20,17 +20,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"net"
 	"net/http"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/onsi/ginkgo"
+	"github.com/onsi/gomega"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
+
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2estatefulset "k8s.io/kubernetes/test/e2e/framework/statefulset"
 	e2etestfiles "k8s.io/kubernetes/test/e2e/framework/testfiles"
@@ -117,13 +120,13 @@ func (t *CassandraUpgradeTest) Setup(f *framework.Framework) {
 
 // listUsers gets a list of users from the db via the tester service.
 func (t *CassandraUpgradeTest) listUsers() ([]string, error) {
-	r, err := http.Get(fmt.Sprintf("http://%s:8080/list", t.ip))
+	r, err := http.Get(fmt.Sprintf("http://%s/list", net.JoinHostPort(t.ip, "8080")))
 	if err != nil {
 		return nil, err
 	}
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusOK {
-		b, err := ioutil.ReadAll(r.Body)
+		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			return nil, err
 		}
@@ -139,13 +142,13 @@ func (t *CassandraUpgradeTest) listUsers() ([]string, error) {
 // addUser adds a user to the db via the tester services.
 func (t *CassandraUpgradeTest) addUser(name string) error {
 	val := map[string][]string{"name": {name}}
-	r, err := http.PostForm(fmt.Sprintf("http://%s:8080/add", t.ip), val)
+	r, err := http.PostForm(fmt.Sprintf("http://%s/add", net.JoinHostPort(t.ip, "8080")), val)
 	if err != nil {
 		return err
 	}
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusOK {
-		b, err := ioutil.ReadAll(r.Body)
+		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			return err
 		}
@@ -204,20 +207,19 @@ func (t *CassandraUpgradeTest) Test(f *framework.Framework, done <-chan struct{}
 		lastUserCount = len(users)
 	}, 10*time.Millisecond, done)
 	framework.Logf("got %d users; want >=%d", lastUserCount, t.successfulWrites)
-
-	framework.ExpectEqual(lastUserCount >= t.successfulWrites, true)
+	gomega.Expect(lastUserCount).To(gomega.BeNumerically(">=", t.successfulWrites), "lastUserCount is too small")
 	ratio := float64(success) / float64(success+failures)
 	framework.Logf("Successful gets %d/%d=%v", success, success+failures, ratio)
 	ratio = float64(t.successfulWrites) / float64(writeAttempts)
 	framework.Logf("Successful writes %d/%d=%v", t.successfulWrites, writeAttempts, ratio)
 	framework.Logf("Errors: %v", errors)
 	// TODO(maisem): tweak this value once we have a few test runs.
-	framework.ExpectEqual(ratio > 0.75, true)
+	gomega.Expect(ratio).To(gomega.BeNumerically(">", 0.75), "ratio too small")
 }
 
 // Teardown does one final check of the data's availability.
 func (t *CassandraUpgradeTest) Teardown(f *framework.Framework) {
 	users, err := t.listUsers()
 	framework.ExpectNoError(err)
-	framework.ExpectEqual(len(users) >= t.successfulWrites, true)
+	gomega.Expect(len(users)).To(gomega.BeNumerically(">=", t.successfulWrites), "len(users) is too small")
 }

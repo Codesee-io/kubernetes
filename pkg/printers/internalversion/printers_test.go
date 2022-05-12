@@ -222,7 +222,7 @@ func TestPrintEvent(t *testing.T) {
 					FieldPath: "spec.containers{foo}",
 				},
 				Series: &api.EventSeries{
-					Count:            1,
+					Count:            2,
 					LastObservedTime: metav1.MicroTime{Time: time.Now().UTC().AddDate(0, 0, -2)},
 				},
 				Reason:     "Event Reason",
@@ -5812,6 +5812,43 @@ func TestPrintStorageVersion(t *testing.T) {
 
 	for i, test := range tests {
 		rows, err := printStorageVersion(&test.sv, printers.GenerateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range rows {
+			rows[i].Object.Object = nil
+		}
+		if !reflect.DeepEqual(test.expected, rows) {
+			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+		}
+	}
+}
+
+func TestPrintScale(t *testing.T) {
+	tests := []struct {
+		scale    autoscaling.Scale
+		options  printers.GenerateOptions
+		expected []metav1.TableRow
+	}{
+		{
+			scale: autoscaling.Scale{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-autoscaling",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(1.9e9)},
+				},
+				Spec:   autoscaling.ScaleSpec{Replicas: 2},
+				Status: autoscaling.ScaleStatus{Replicas: 1},
+			},
+			expected: []metav1.TableRow{
+				{
+					Cells: []interface{}{"test-autoscaling", int32(2), int32(1), string("0s")},
+				},
+			},
+		},
+	}
+
+	for i, test := range tests {
+		rows, err := printScale(&test.scale, test.options)
 		if err != nil {
 			t.Fatal(err)
 		}

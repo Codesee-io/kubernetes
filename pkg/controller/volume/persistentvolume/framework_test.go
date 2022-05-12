@@ -17,6 +17,7 @@ limitations under the License.
 package persistentvolume
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -40,9 +41,9 @@ import (
 	storagelisters "k8s.io/client-go/listers/storage/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	storagehelpers "k8s.io/component-helpers/storage/volume"
 	"k8s.io/kubernetes/pkg/controller"
 	pvtesting "k8s.io/kubernetes/pkg/controller/volume/persistentvolume/testing"
-	pvutil "k8s.io/kubernetes/pkg/controller/volume/persistentvolume/util"
 	"k8s.io/kubernetes/pkg/volume"
 	vol "k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util/recyclerclient"
@@ -285,7 +286,7 @@ func newVolume(name, capacity, boundToClaimUID, boundToClaimName string, phase v
 		volume.Annotations = make(map[string]string)
 		for _, a := range annotations {
 			switch a {
-			case pvutil.AnnDynamicallyProvisioned:
+			case storagehelpers.AnnDynamicallyProvisioned:
 				volume.Annotations[a] = mockPluginName
 			default:
 				volume.Annotations[a] = "yes"
@@ -294,6 +295,72 @@ func newVolume(name, capacity, boundToClaimUID, boundToClaimName string, phase v
 	}
 
 	return &volume
+}
+
+// newExternalProvisionedVolume returns a new volume with given attributes
+func newExternalProvisionedVolume(name, capacity, boundToClaimUID, boundToClaimName string, phase v1.PersistentVolumePhase, reclaimPolicy v1.PersistentVolumeReclaimPolicy, class string, driverName string, finalizers []string, annotations ...string) *v1.PersistentVolume {
+	fs := v1.PersistentVolumeFilesystem
+	volume := v1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			ResourceVersion: "1",
+			Finalizers:      finalizers,
+		},
+		Spec: v1.PersistentVolumeSpec{
+			Capacity: v1.ResourceList{
+				v1.ResourceName(v1.ResourceStorage): resource.MustParse(capacity),
+			},
+			PersistentVolumeSource: v1.PersistentVolumeSource{
+				CSI: &v1.CSIPersistentVolumeSource{
+					Driver:       driverName,
+					VolumeHandle: "527b55dc-c7db-4574-9226-2e33318b06a3",
+					ReadOnly:     false,
+					FSType:       "ext4",
+					VolumeAttributes: map[string]string{
+						"Test-Key": "Test-Value",
+					},
+				},
+			},
+			AccessModes:                   []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce, v1.ReadOnlyMany},
+			PersistentVolumeReclaimPolicy: reclaimPolicy,
+			StorageClassName:              class,
+			VolumeMode:                    &fs,
+		},
+		Status: v1.PersistentVolumeStatus{
+			Phase: phase,
+		},
+	}
+
+	if boundToClaimName != "" {
+		volume.Spec.ClaimRef = &v1.ObjectReference{
+			Kind:       "PersistentVolumeClaim",
+			APIVersion: "v1",
+			UID:        types.UID(boundToClaimUID),
+			Namespace:  testNamespace,
+			Name:       boundToClaimName,
+		}
+	}
+
+	if len(annotations) > 0 {
+		volume.Annotations = make(map[string]string)
+		for _, a := range annotations {
+			switch a {
+			case storagehelpers.AnnDynamicallyProvisioned:
+				volume.Annotations[a] = driverName
+			default:
+				volume.Annotations[a] = "yes"
+			}
+		}
+	}
+
+	return &volume
+}
+
+// newVolume returns a new volume with given attributes
+func newVolumeWithFinalizers(name, capacity, boundToClaimUID, boundToClaimName string, phase v1.PersistentVolumePhase, reclaimPolicy v1.PersistentVolumeReclaimPolicy, class string, finalizers []string, annotations ...string) *v1.PersistentVolume {
+	retVolume := newVolume(name, capacity, boundToClaimUID, boundToClaimName, phase, reclaimPolicy, class, annotations...)
+	retVolume.SetFinalizers(finalizers)
+	return retVolume
 }
 
 // withLabels applies the given labels to the first volume in the array and
@@ -369,6 +436,15 @@ func withVolumeDeletionTimestamp(pvs []*v1.PersistentVolume) []*v1.PersistentVol
 	return result
 }
 
+func volumesWithFinalizers(pvs []*v1.PersistentVolume, finalizers []string) []*v1.PersistentVolume {
+	result := []*v1.PersistentVolume{}
+	for _, pv := range pvs {
+		pv.SetFinalizers(finalizers)
+		result = append(result, pv)
+	}
+	return result
+}
+
 // newClaim returns a new claim with given attributes
 func newClaim(name, claimUID, capacity, boundToVolume string, phase v1.PersistentVolumeClaimPhase, class *string, annotations ...string) *v1.PersistentVolumeClaim {
 	fs := v1.PersistentVolumeFilesystem
@@ -394,14 +470,12 @@ func newClaim(name, claimUID, capacity, boundToVolume string, phase v1.Persisten
 			Phase: phase,
 		},
 	}
-	// Make sure ref.GetReference(claim) works
-	claim.ObjectMeta.SelfLink = "/api/v1/namespaces/" + testNamespace + "/persistentvolumeclaims/" + name
 
 	if len(annotations) > 0 {
 		claim.Annotations = make(map[string]string)
 		for _, a := range annotations {
 			switch a {
-			case pvutil.AnnBetaStorageProvisioner, pvutil.AnnStorageProvisioner:
+			case storagehelpers.AnnBetaStorageProvisioner, storagehelpers.AnnStorageProvisioner:
 				claim.Annotations[a] = mockPluginName
 			default:
 				claim.Annotations[a] = "yes"
@@ -490,11 +564,11 @@ func claimWithAccessMode(modes []v1.PersistentVolumeAccessMode, claims []*v1.Per
 }
 
 func testSyncClaim(ctrl *PersistentVolumeController, reactor *pvtesting.VolumeReactor, test controllerTest) error {
-	return ctrl.syncClaim(test.initialClaims[0])
+	return ctrl.syncClaim(context.TODO(), test.initialClaims[0])
 }
 
 func testSyncClaimError(ctrl *PersistentVolumeController, reactor *pvtesting.VolumeReactor, test controllerTest) error {
-	err := ctrl.syncClaim(test.initialClaims[0])
+	err := ctrl.syncClaim(context.TODO(), test.initialClaims[0])
 
 	if err != nil {
 		return nil
@@ -503,7 +577,7 @@ func testSyncClaimError(ctrl *PersistentVolumeController, reactor *pvtesting.Vol
 }
 
 func testSyncVolume(ctrl *PersistentVolumeController, reactor *pvtesting.VolumeReactor, test controllerTest) error {
-	return ctrl.syncVolume(test.initialVolumes[0])
+	return ctrl.syncVolume(context.TODO(), test.initialVolumes[0])
 }
 
 type operationType string
@@ -797,7 +871,7 @@ func runMultisyncTests(t *testing.T, tests []controllerTest, storageClasses []*s
 				claim := obj.(*v1.PersistentVolumeClaim)
 				// Simulate "claim updated" event
 				ctrl.claims.Update(claim)
-				err = ctrl.syncClaim(claim)
+				err = ctrl.syncClaim(context.TODO(), claim)
 				if err != nil {
 					if err == pvtesting.ErrVersionConflict {
 						// Ignore version errors
@@ -814,7 +888,7 @@ func runMultisyncTests(t *testing.T, tests []controllerTest, storageClasses []*s
 				volume := obj.(*v1.PersistentVolume)
 				// Simulate "volume updated" event
 				ctrl.volumes.store.Update(volume)
-				err = ctrl.syncVolume(volume)
+				err = ctrl.syncVolume(context.TODO(), volume)
 				if err != nil {
 					if err == pvtesting.ErrVersionConflict {
 						// Ignore version errors

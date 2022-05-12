@@ -21,16 +21,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ishidawataru/sctp"
@@ -51,6 +52,7 @@ var (
 	privKeyFile        = ""
 	httpOverride       = ""
 	udpListenAddresses = ""
+	delayShutdown      = 0
 )
 
 const bindToAny = ""
@@ -63,6 +65,9 @@ var CmdNetexec = &cobra.Command{
 
 - /: Returns the request's timestamp.
 - /clientip: Returns the request's IP address.
+- /header: Returns the request's header value corresponding to the key provided or the entire 
+  header marshalled as json, if no form value (key) is provided.
+  ("/header?key=X-Forwarded-For" or /header)
 - /dial: Creates a given number of requests to the given host and port using the given protocol,
   and returns a JSON with the fields "responses" (successful request responses) and "errors" (
   failed request responses). Returns "200 OK" status code if the last request succeeded,
@@ -106,11 +111,13 @@ will be upgraded to HTTPS. The image has default, "localhost"-based cert/privkey
 If "--http-override" is set, the HTTP(S) server will always serve the override path & options,
 ignoring the request URL.
 
-It will also start a UDP server on the indicated UDP port that responds to the following commands:
+It will also start a UDP server on the indicated UDP port and addresses that responds to the following commands:
 
 - "hostname": Returns the server's hostname
 - "echo <msg>": Returns the given <msg>
 - "clientip": Returns the request's IP address
+
+The UDP server can be disabled by setting --udp-port to -1.
 
 Additionally, if (and only if) --sctp-port is passed, it will start an SCTP server on that port,
 responding to the same commands as the UDP server.
@@ -129,6 +136,7 @@ func init() {
 	CmdNetexec.Flags().IntVar(&sctpPort, "sctp-port", -1, "SCTP Listen Port")
 	CmdNetexec.Flags().StringVar(&httpOverride, "http-override", "", "Override the HTTP handler to always respond as if it were a GET with this path & params")
 	CmdNetexec.Flags().StringVar(&udpListenAddresses, "udp-listen-addresses", "", "A comma separated list of ip addresses the udp servers listen from")
+	CmdNetexec.Flags().IntVar(&delayShutdown, "delay-shutdown", 0, "Number of seconds to delay shutdown when receiving SIGTERM.")
 }
 
 // atomicBool uses load/store operations on an int32 to simulate an atomic boolean.
@@ -152,6 +160,18 @@ func (a *atomicBool) get() bool {
 
 func main(cmd *cobra.Command, args []string) {
 	exitCh := make(chan shutdownRequest)
+
+	if delayShutdown > 0 {
+		termCh := make(chan os.Signal, 1)
+		signal.Notify(termCh, syscall.SIGTERM)
+		go func() {
+			<-termCh
+			log.Printf("Sleeping %d seconds before terminating...", delayShutdown)
+			time.Sleep(time.Duration(delayShutdown) * time.Second)
+			os.Exit(0)
+		}()
+	}
+
 	if httpOverride != "" {
 		mux := http.NewServeMux()
 		addRoutes(mux, exitCh)
@@ -168,14 +188,19 @@ func main(cmd *cobra.Command, args []string) {
 		addRoutes(http.DefaultServeMux, exitCh)
 	}
 
-	udpBindTo, err := parseAddresses(udpListenAddresses)
-	if err != nil {
-		log.Fatal(err)
+	// UDP server
+	if udpPort != -1 {
+		udpBindTo, err := parseAddresses(udpListenAddresses)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		for _, address := range udpBindTo {
+			go startUDPServer(address, udpPort)
+		}
 	}
 
-	for _, address := range udpBindTo {
-		go startUDPServer(address, udpPort)
-	}
+	// SCTP server
 	if sctpPort != -1 {
 		go startSCTPServer(sctpPort)
 	}
@@ -191,6 +216,7 @@ func main(cmd *cobra.Command, args []string) {
 func addRoutes(mux *http.ServeMux, exitCh chan shutdownRequest) {
 	mux.HandleFunc("/", rootHandler)
 	mux.HandleFunc("/clientip", clientIPHandler)
+	mux.HandleFunc("/header", headerHandler)
 	mux.HandleFunc("/dial", dialHandler)
 	mux.HandleFunc("/echo", echoHandler)
 	mux.HandleFunc("/exit", func(w http.ResponseWriter, req *http.Request) { exitHandler(w, req, exitCh) })
@@ -247,6 +273,21 @@ func echoHandler(w http.ResponseWriter, r *http.Request) {
 func clientIPHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("GET /clientip")
 	fmt.Fprintf(w, r.RemoteAddr)
+}
+func headerHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.FormValue("key")
+	if key != "" {
+		log.Printf("GET /header?key=%s", key)
+		fmt.Fprintf(w, "%s", r.Header.Get(key))
+	} else {
+		log.Printf("GET /header")
+		data, err := json.Marshal(r.Header)
+		if err != nil {
+			fmt.Fprintf(w, "error marshalling header, err: %v", err)
+			return
+		}
+		fmt.Fprintf(w, "%s", string(data))
+	}
 }
 
 type shutdownRequest struct {
@@ -384,7 +425,7 @@ func dialHTTP(request string, addr net.Addr) (string, error) {
 	defer transport.CloseIdleConnections()
 	if err == nil {
 		defer resp.Body.Close()
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err == nil {
 			return string(body), nil
 		}
@@ -482,7 +523,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	f, err := ioutil.TempFile("/uploads", "upload")
+	f, err := os.CreateTemp("/uploads", "upload")
 	if err != nil {
 		result["error"] = "Unable to open file for write"
 		bytes, err := json.Marshal(result)

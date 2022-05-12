@@ -32,7 +32,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/record"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/kubernetes/pkg/features"
 	netutils "k8s.io/utils/net"
@@ -78,6 +78,7 @@ func TestParseResolvConf(t *testing.T) {
 		{"nameserver 1.2.3.4\nnameserver 5.6.7.8", []string{"1.2.3.4", "5.6.7.8"}, []string{}, []string{}, false},
 		{"nameserver 1.2.3.4 #comment", []string{"1.2.3.4"}, []string{}, []string{}, false},
 		{"search ", []string{}, []string{}, []string{}, false}, // search empty
+		{"search .", []string{}, []string{"."}, []string{}, false},
 		{"search foo", []string{}, []string{"foo"}, []string{}, false},
 		{"search foo bar", []string{}, []string{"foo", "bar"}, []string{}, false},
 		{"search foo. bar", []string{}, []string{"foo", "bar"}, []string{}, false},

@@ -18,7 +18,6 @@ package controlplane
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -32,7 +31,6 @@ import (
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
-	"k8s.io/kubernetes/cmd/kubeadm/app/features"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/certs"
 	pkiutiltesting "k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil/testing"
 	staticpodutil "k8s.io/kubernetes/cmd/kubeadm/app/util/staticpod"
@@ -165,7 +163,7 @@ func TestCreateStaticPodFilesWithPatches(t *testing.T) {
 	    patched: "true"
 	`)
 
-	err = ioutil.WriteFile(filepath.Join(patchesPath, kubeadmconstants.KubeAPIServer+".yaml"), []byte(patchString), 0644)
+	err = os.WriteFile(filepath.Join(patchesPath, kubeadmconstants.KubeAPIServer+".yaml"), []byte(patchString), 0644)
 	if err != nil {
 		t.Fatalf("WriteFile returned unexpected error: %v", err)
 	}
@@ -546,7 +544,6 @@ func TestGetControllerManagerCommand(t *testing.T) {
 				KubernetesVersion: cpVersion,
 				CertificatesDir:   testCertsDir,
 				ClusterName:       "some-other-cluster-name",
-				FeatureGates:      map[string]bool{features.IPv6DualStack: false},
 			},
 			expected: []string{
 				"kube-controller-manager",
@@ -563,7 +560,6 @@ func TestGetControllerManagerCommand(t *testing.T) {
 				"--authorization-kubeconfig=" + kubeadmconstants.KubernetesDir + "/controller-manager.conf",
 				"--client-ca-file=" + testCertsDir + "/ca.crt",
 				"--requestheader-client-ca-file=" + testCertsDir + "/front-proxy-ca.crt",
-				"--feature-gates=IPv6DualStack=false",
 				"--cluster-name=some-other-cluster-name",
 			},
 		},
@@ -626,7 +622,6 @@ func TestGetControllerManagerCommand(t *testing.T) {
 				},
 				CertificatesDir:   testCertsDir,
 				KubernetesVersion: cpVersion,
-				FeatureGates:      map[string]bool{features.IPv6DualStack: false},
 			},
 			expected: []string{
 				"kube-controller-manager",
@@ -643,7 +638,6 @@ func TestGetControllerManagerCommand(t *testing.T) {
 				"--authorization-kubeconfig=" + kubeadmconstants.KubernetesDir + "/controller-manager.conf",
 				"--client-ca-file=" + testCertsDir + "/ca.crt",
 				"--requestheader-client-ca-file=" + testCertsDir + "/front-proxy-ca.crt",
-				"--feature-gates=IPv6DualStack=false",
 				"--allocate-node-cidrs=true",
 				"--cluster-cidr=10.0.1.15/16",
 				"--service-cluster-ip-range=172.20.0.0/24",
@@ -755,7 +749,6 @@ func TestGetControllerManagerCommand(t *testing.T) {
 				},
 				CertificatesDir:   testCertsDir,
 				KubernetesVersion: cpVersion,
-				FeatureGates:      map[string]bool{features.IPv6DualStack: true},
 			},
 			expected: []string{
 				"kube-controller-manager",
@@ -772,7 +765,6 @@ func TestGetControllerManagerCommand(t *testing.T) {
 				"--authorization-kubeconfig=" + kubeadmconstants.KubernetesDir + "/controller-manager.conf",
 				"--client-ca-file=" + testCertsDir + "/ca.crt",
 				"--requestheader-client-ca-file=" + testCertsDir + "/front-proxy-ca.crt",
-				"--feature-gates=IPv6DualStack=true",
 				"--allocate-node-cidrs=true",
 				"--cluster-cidr=2001:db8::/64,10.1.0.0/16",
 				"--service-cluster-ip-range=fd03::/112,192.168.0.0/16",

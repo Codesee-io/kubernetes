@@ -47,7 +47,7 @@ const (
 
 // Manifest is the SP's manifest.
 var Manifest = map[string]string{
-	"url": "https://k8s.io/kubernetes/test/e2e/storage/drivers/csi-test/mock",
+	"url": "https://github.com/kubernetes/kubernetes/tree/master/test/e2e/storage/drivers/csi-test/mock",
 }
 
 type Config struct {
@@ -55,6 +55,7 @@ type Config struct {
 	DriverName                 string
 	AttachLimit                int64
 	NodeExpansionRequired      bool
+	VolumeMountGroupRequired   bool
 	DisableControllerExpansion bool
 	DisableOnlineExpansion     bool
 	PermissiveTargetPath       bool

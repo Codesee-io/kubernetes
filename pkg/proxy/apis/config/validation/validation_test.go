@@ -122,7 +122,6 @@ func TestValidateKubeProxyConfiguration(t *testing.T) {
 			BindAddress:        "10.10.12.11",
 			HealthzBindAddress: "0.0.0.0:12345",
 			MetricsBindAddress: "127.0.0.1:10249",
-			FeatureGates:       map[string]bool{"IPv6DualStack": true},
 			ClusterCIDR:        "192.168.59.0/24",
 			UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
 			ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
@@ -142,7 +141,6 @@ func TestValidateKubeProxyConfiguration(t *testing.T) {
 			BindAddress:        "10.10.12.11",
 			HealthzBindAddress: "0.0.0.0:12345",
 			MetricsBindAddress: "127.0.0.1:10249",
-			FeatureGates:       map[string]bool{"IPv6DualStack": true},
 			ClusterCIDR:        "fd00:192:168::/64",
 			UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
 			ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
@@ -162,7 +160,6 @@ func TestValidateKubeProxyConfiguration(t *testing.T) {
 			BindAddress:        "10.10.12.11",
 			HealthzBindAddress: "0.0.0.0:12345",
 			MetricsBindAddress: "127.0.0.1:10249",
-			FeatureGates:       map[string]bool{"IPv6DualStack": true},
 			ClusterCIDR:        "192.168.59.0/24,fd00:192:168::/64",
 			UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
 			ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
@@ -176,6 +173,52 @@ func TestValidateKubeProxyConfiguration(t *testing.T) {
 				Min:                   pointer.Int32Ptr(1),
 				TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
 				TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+			},
+		},
+		{
+			BindAddress:        "10.10.12.11",
+			HealthzBindAddress: "0.0.0.0:12345",
+			MetricsBindAddress: "127.0.0.1:10249",
+			ClusterCIDR:        "192.168.59.0/24",
+			UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
+			ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
+			IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+				MasqueradeAll: true,
+				SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+				MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+			},
+			Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+				MaxPerCore:            pointer.Int32Ptr(1),
+				Min:                   pointer.Int32Ptr(1),
+				TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+				TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+			},
+			DetectLocalMode: kubeproxyconfig.LocalModeInterfaceNamePrefix,
+			DetectLocal: kubeproxyconfig.DetectLocalConfiguration{
+				InterfaceNamePrefix: "vethabcde",
+			},
+		},
+		{
+			BindAddress:        "10.10.12.11",
+			HealthzBindAddress: "0.0.0.0:12345",
+			MetricsBindAddress: "127.0.0.1:10249",
+			ClusterCIDR:        "192.168.59.0/24",
+			UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
+			ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
+			IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+				MasqueradeAll: true,
+				SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+				MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+			},
+			Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+				MaxPerCore:            pointer.Int32Ptr(1),
+				Min:                   pointer.Int32Ptr(1),
+				TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+				TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+			},
+			DetectLocalMode: kubeproxyconfig.LocalModeBridgeInterface,
+			DetectLocal: kubeproxyconfig.DetectLocalConfiguration{
+				BridgeInterface: "avz",
 			},
 		},
 	}
@@ -279,36 +322,11 @@ func TestValidateKubeProxyConfiguration(t *testing.T) {
 			},
 			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("ClusterCIDR"), "192.168.59.0", "must be a valid CIDR block (e.g. 10.100.0.0/16 or fde4:8dba:82e1::/48)")},
 		},
-		"Two ClusterCIDR addresses provided without DualStack feature-enabled": {
-			config: kubeproxyconfig.KubeProxyConfiguration{
-				BindAddress:        "10.10.12.11",
-				HealthzBindAddress: "0.0.0.0:12345",
-				MetricsBindAddress: "127.0.0.1:10249",
-				// DualStack ClusterCIDR without feature flag enabled
-				FeatureGates:     map[string]bool{"IPv6DualStack": false},
-				ClusterCIDR:      "192.168.59.0/24,fd00:192:168::/64",
-				UDPIdleTimeout:   metav1.Duration{Duration: 1 * time.Second},
-				ConfigSyncPeriod: metav1.Duration{Duration: 1 * time.Second},
-				IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
-					MasqueradeAll: true,
-					SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
-					MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
-				},
-				Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
-					MaxPerCore:            pointer.Int32Ptr(1),
-					Min:                   pointer.Int32Ptr(1),
-					TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
-					TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
-				},
-			},
-			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("ClusterCIDR"), "192.168.59.0/24,fd00:192:168::/64", "only one CIDR allowed (e.g. 10.100.0.0/16 or fde4:8dba:82e1::/48)")},
-		},
 		"Invalid number of ClusterCIDRs": {
 			config: kubeproxyconfig.KubeProxyConfiguration{
 				BindAddress:        "10.10.12.11",
 				HealthzBindAddress: "0.0.0.0:12345",
 				MetricsBindAddress: "127.0.0.1:10249",
-				FeatureGates:       map[string]bool{"IPv6DualStack": true},
 				ClusterCIDR:        "192.168.59.0/24,fd00:192:168::/64,10.0.0.0/16",
 				UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
 				ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
@@ -394,18 +412,72 @@ func TestValidateKubeProxyConfiguration(t *testing.T) {
 			},
 			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("KubeProxyIPVSConfiguration.SyncPeriod"), metav1.Duration{Duration: 0}, "must be greater than 0")},
 		},
+		"interfacePrefix is empty": {
+			config: kubeproxyconfig.KubeProxyConfiguration{
+				BindAddress:        "10.10.12.11",
+				HealthzBindAddress: "0.0.0.0:12345",
+				MetricsBindAddress: "127.0.0.1:10249",
+				ClusterCIDR:        "192.168.59.0/24",
+				UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
+				ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
+				IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+					MasqueradeAll: true,
+					SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+					MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+				},
+				Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+					MaxPerCore:            pointer.Int32Ptr(1),
+					Min:                   pointer.Int32Ptr(1),
+					TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+					TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+				},
+				DetectLocalMode: kubeproxyconfig.LocalModeInterfaceNamePrefix,
+				DetectLocal: kubeproxyconfig.DetectLocalConfiguration{
+					InterfaceNamePrefix: "",
+				},
+			},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("InterfacePrefix"), "", "must not be empty")},
+		},
+		"bridgeInterfaceName is empty": {
+			config: kubeproxyconfig.KubeProxyConfiguration{
+				BindAddress:        "10.10.12.11",
+				HealthzBindAddress: "0.0.0.0:12345",
+				MetricsBindAddress: "127.0.0.1:10249",
+				ClusterCIDR:        "192.168.59.0/24",
+				UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
+				ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
+				IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
+					MasqueradeAll: true,
+					SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
+					MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
+				},
+				Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
+					MaxPerCore:            pointer.Int32Ptr(1),
+					Min:                   pointer.Int32Ptr(1),
+					TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
+					TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
+				},
+				DetectLocalMode: kubeproxyconfig.LocalModeBridgeInterface,
+				DetectLocal: kubeproxyconfig.DetectLocalConfiguration{
+					InterfaceNamePrefix: "eth0", // we won't care about prefix since mode is not prefix
+				},
+			},
+			expectedErrs: field.ErrorList{field.Invalid(newPath.Child("InterfaceName"), "", "must not be empty")},
+		},
 	}
 
-	for _, testCase := range testCases {
-		errs := Validate(&testCase.config)
-		if len(testCase.expectedErrs) != len(errs) {
-			t.Fatalf("Expected %d errors, got %d errors: %v", len(testCase.expectedErrs), len(errs), errs)
-		}
-		for i, err := range errs {
-			if err.Error() != testCase.expectedErrs[i].Error() {
-				t.Fatalf("Expected error: %s, got %s", testCase.expectedErrs[i], err.Error())
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			errs := Validate(&testCase.config)
+			if len(testCase.expectedErrs) != len(errs) {
+				t.Fatalf("Expected %d errors, got %d errors: %v", len(testCase.expectedErrs), len(errs), errs)
 			}
-		}
+			for i, err := range errs {
+				if err.Error() != testCase.expectedErrs[i].Error() {
+					t.Fatalf("Expected error: %s, got %s", testCase.expectedErrs[i], err.Error())
+				}
+			}
+		})
 	}
 }
 

@@ -27,11 +27,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/kubernetes/pkg/apis/networking"
-	"k8s.io/kubernetes/pkg/features"
 	netutils "k8s.io/utils/net"
 	utilpointer "k8s.io/utils/pointer"
 )
@@ -182,6 +180,11 @@ func ValidateNetworkPolicyUpdate(update, old *networking.NetworkPolicy) field.Er
 	allErrs = append(allErrs, apivalidation.ValidateObjectMetaUpdate(&update.ObjectMeta, &old.ObjectMeta, field.NewPath("metadata"))...)
 	allErrs = append(allErrs, ValidateNetworkPolicySpec(&update.Spec, field.NewPath("spec"))...)
 	return allErrs
+}
+
+// ValidateNetworkPolicyStatusUpdate tests if an update to a NetworkPolicy status is valid
+func ValidateNetworkPolicyStatusUpdate(status, oldstatus networking.NetworkPolicyStatus, fldPath *field.Path) field.ErrorList {
+	return unversionedvalidation.ValidateConditions(status.Conditions, fldPath.Child("conditions"))
 }
 
 // ValidateIPBlock validates a cidr and the except fields of an IpBlock NetworkPolicyPeer
@@ -537,7 +540,7 @@ func validateIngressClassParametersReference(params *networking.IngressClassPara
 		Name:     params.Name,
 	}, fldPath)...)
 
-	if utilfeature.DefaultFeatureGate.Enabled(features.IngressClassNamespacedParams) && params.Scope == nil {
+	if params.Scope == nil {
 		allErrs = append(allErrs, field.Required(fldPath.Child("scope"), ""))
 		return allErrs
 	}

@@ -27,7 +27,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 
 	"math/rand"
 	"os"
@@ -40,12 +39,15 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	clientset "k8s.io/client-go/kubernetes"
 	cliflag "k8s.io/component-base/cli/flag"
+	"k8s.io/component-base/logs"
 	"k8s.io/kubernetes/pkg/util/rlimit"
 	commontest "k8s.io/kubernetes/test/e2e/common"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2econfig "k8s.io/kubernetes/test/e2e/framework/config"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	e2etestfiles "k8s.io/kubernetes/test/e2e/framework/testfiles"
 	e2etestingmanifests "k8s.io/kubernetes/test/e2e/testing-manifests"
 	"k8s.io/kubernetes/test/e2e_node/services"
@@ -62,6 +64,8 @@ import (
 
 var (
 	e2es *services.E2EServices
+	// featureGates is a map of feature names to bools that enable or disable alpha/experimental features.
+	featureGates map[string]bool
 
 	// TODO(random-liu): Change the following modes to sub-command.
 	runServicesMode    = flag.Bool("run-services-mode", false, "If true, only run services (etcd, apiserver) in current process, and not run test.")
@@ -84,7 +88,7 @@ func registerNodeFlags(flags *flag.FlagSet) {
 	// It is hard and unnecessary to deal with the complexity inside the test suite.
 	flags.BoolVar(&framework.TestContext.NodeConformance, "conformance", false, "If true, the test suite will not start kubelet, and fetch system log (kernel, docker, kubelet log etc.) to the report directory.")
 	flags.BoolVar(&framework.TestContext.PrepullImages, "prepull-images", true, "If true, prepull images so image pull failures do not cause test failures.")
-	flags.BoolVar(&framework.TestContext.RestartKubelet, "restart-kubelet", true, "If true, restart Kubelet unit when the process is killed.")
+	flags.BoolVar(&framework.TestContext.RestartKubelet, "restart-kubelet", false, "If true, restart Kubelet unit when the process is killed.")
 	flags.StringVar(&framework.TestContext.ImageDescription, "image-description", "", "The description of the image which the test will be running on.")
 	flags.StringVar(&framework.TestContext.SystemSpecName, "system-spec-name", "", "The name of the system spec (e.g., gke) that's used in the node e2e test. The system specs are in test/e2e_node/system/specs/. This is used by the test framework to determine which tests to run for validating the system requirements.")
 	flags.Var(cliflag.NewMapStringString(&framework.TestContext.ExtraEnvs), "extra-envs", "The extra environment variables needed for node e2e tests. Format: a list of key=value pairs, e.g., env1=val1,env2=val2")
@@ -92,6 +96,7 @@ func registerNodeFlags(flags *flag.FlagSet) {
 	flag.StringVar(&framework.TestContext.ClusterDNSDomain, "dns-domain", "", "The DNS Domain of the cluster.")
 	flag.Var(cliflag.NewMapStringString(&framework.TestContext.RuntimeConfig), "runtime-config", "The runtime configuration used on node e2e tests.")
 	flags.BoolVar(&framework.TestContext.RequireDevices, "require-devices", false, "If true, require device plugins to be installed in the running environment.")
+	flags.Var(cliflag.NewMapStringBool(&featureGates), "feature-gates", "A set of key=value pairs that describe feature gates for alpha/experimental features.")
 }
 
 func init() {
@@ -105,6 +110,7 @@ func TestMain(m *testing.M) {
 	e2econfig.CopyFlags(e2econfig.Flags, flag.CommandLine)
 	framework.RegisterCommonFlags(flag.CommandLine)
 	registerNodeFlags(flag.CommandLine)
+	logs.AddFlags(pflag.CommandLine)
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	// Mark the run-services-mode flag as hidden to prevent user from using it.
 	pflag.CommandLine.MarkHidden("run-services-mode")
@@ -117,6 +123,10 @@ func TestMain(m *testing.M) {
 	rand.Seed(time.Now().UnixNano())
 	pflag.Parse()
 	framework.AfterReadingAllFlags(&framework.TestContext)
+	if err := e2eskipper.InitFeatureGates(utilfeature.DefaultFeatureGate, featureGates); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: initialize feature gates: %v", err)
+		os.Exit(1)
+	}
 	setExtraEnvs()
 	os.Exit(m.Run())
 }
@@ -139,7 +149,7 @@ func TestE2eNode(t *testing.T) {
 	}
 	if *runKubeletMode {
 		// If run-kubelet-mode is specified, only start kubelet.
-		services.RunKubelet()
+		services.RunKubelet(featureGates)
 		return
 	}
 	if *systemValidateMode {
@@ -161,17 +171,18 @@ func TestE2eNode(t *testing.T) {
 				klog.Exitf("chroot %q failed: %v", rootfs, err)
 			}
 		}
-		if _, err := system.ValidateSpec(*spec, framework.TestContext.ContainerRuntime); len(err) != 0 {
+		if _, err := system.ValidateSpec(*spec, "remote"); len(err) != 0 {
 			klog.Exitf("system validation failed: %v", err)
 		}
 		return
 	}
-	// If run-services-mode is not specified, run test.
+
+	// We're not running in a special mode so lets run tests.
 	gomega.RegisterFailHandler(ginkgo.Fail)
 	reporters := []ginkgo.Reporter{}
 	reportDir := framework.TestContext.ReportDir
 	if reportDir != "" {
-		// Create the directory if it doesn't already exists
+		// Create the directory if it doesn't already exist
 		if err := os.MkdirAll(reportDir, 0755); err != nil {
 			klog.Errorf("Failed creating report directory: %v", err)
 		} else {
@@ -207,7 +218,7 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 		// If the services are expected to stop after test, they should monitor the test process.
 		// If the services are expected to keep running after test, they should not monitor the test process.
 		e2es = services.NewE2EServices(*stopServices)
-		gomega.Expect(e2es.Start()).To(gomega.Succeed(), "should be able to start node services.")
+		gomega.Expect(e2es.Start(featureGates)).To(gomega.Succeed(), "should be able to start node services.")
 	} else {
 		klog.Infof("Running tests without starting services.")
 	}
@@ -257,7 +268,7 @@ func validateSystem() error {
 }
 
 func maskLocksmithdOnCoreos() {
-	data, err := ioutil.ReadFile("/etc/os-release")
+	data, err := os.ReadFile("/etc/os-release")
 	if err != nil {
 		// Not all distros contain this file.
 		klog.Infof("Could not read /etc/os-release: %v", err)
@@ -292,8 +303,6 @@ func waitForNodeReady() {
 }
 
 // updateTestContext updates the test context with the node name.
-// TODO(random-liu): Using dynamic kubelet configuration feature to
-// update test context with node configuration.
 func updateTestContext() error {
 	setExtraEnvs()
 	updateImageAllowList()
@@ -349,7 +358,7 @@ func getAPIServerClient() (*clientset.Clientset, error) {
 // loadSystemSpecFromFile returns the system spec from the file with the
 // filename.
 func loadSystemSpecFromFile(filename string) (*system.SysSpec, error) {
-	b, err := ioutil.ReadFile(filename)
+	b, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}

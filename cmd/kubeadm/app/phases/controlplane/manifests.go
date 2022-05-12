@@ -103,7 +103,7 @@ func CreateStaticPodFiles(manifestDir, patchesDir string, cfg *kubeadmapi.Cluste
 	var err error
 	if features.Enabled(cfg.FeatureGates, features.RootlessControlPlane) {
 		if isDryRun {
-			fmt.Printf("[dryrun] Would create users and groups for %+v to run as non-root\n", componentNames)
+			fmt.Printf("[control-plane] Would create users and groups for %+v to run as non-root\n", componentNames)
 		} else {
 			usersAndGroups, err = staticpodutil.GetUsersAndGroups()
 			if err != nil {
@@ -127,7 +127,7 @@ func CreateStaticPodFiles(manifestDir, patchesDir string, cfg *kubeadmapi.Cluste
 
 		if features.Enabled(cfg.FeatureGates, features.RootlessControlPlane) {
 			if isDryRun {
-				fmt.Printf("[dryrun] Would update static pod manifest for %q to run run as non-root\n", componentName)
+				fmt.Printf("[control-plane] Would update static pod manifest for %q to run run as non-root\n", componentName)
 			} else {
 				if usersAndGroups != nil {
 					if err := staticpodutil.RunComponentAsNonRoot(componentName, &spec, usersAndGroups, cfg); err != nil {
@@ -218,12 +218,6 @@ func getAPIServerCommand(cfg *kubeadmapi.ClusterConfiguration, localAPIEndpoint 
 				defaultArguments["etcd-servers"] = value
 			}
 		}
-	}
-
-	// TODO: The following code should be removed after dual-stack is GA.
-	// Note: The user still retains the ability to explicitly set feature-gates and that value will overwrite this base value.
-	if enabled, present := cfg.FeatureGates[features.IPv6DualStack]; present {
-		defaultArguments["feature-gates"] = fmt.Sprintf("%s=%t", features.IPv6DualStack, enabled)
 	}
 
 	if cfg.APIServer.ExtraArgs == nil {
@@ -343,13 +337,6 @@ func getControllerManagerCommand(cfg *kubeadmapi.ClusterConfiguration) []string 
 		defaultArguments["cluster-name"] = cfg.ClusterName
 	}
 
-	// TODO: The following code should be remvoved after dual-stack is GA.
-	// Note: The user still retains the ability to explicitly set feature-gates and that value will overwrite this base value.
-	enabled, present := cfg.FeatureGates[features.IPv6DualStack]
-	if present {
-		defaultArguments["feature-gates"] = fmt.Sprintf("%s=%t", features.IPv6DualStack, enabled)
-	}
-
 	command := []string{"kube-controller-manager"}
 	command = append(command, kubeadmutil.BuildArgumentListFromMap(defaultArguments, cfg.ControllerManager.ExtraArgs)...)
 
@@ -365,12 +352,6 @@ func getSchedulerCommand(cfg *kubeadmapi.ClusterConfiguration) []string {
 		"kubeconfig":                kubeconfigFile,
 		"authentication-kubeconfig": kubeconfigFile,
 		"authorization-kubeconfig":  kubeconfigFile,
-	}
-
-	// TODO: The following code should be remvoved after dual-stack is GA.
-	// Note: The user still retains the ability to explicitly set feature-gates and that value will overwrite this base value.
-	if enabled, present := cfg.FeatureGates[features.IPv6DualStack]; present {
-		defaultArguments["feature-gates"] = fmt.Sprintf("%s=%t", features.IPv6DualStack, enabled)
 	}
 
 	command := []string{"kube-scheduler"}

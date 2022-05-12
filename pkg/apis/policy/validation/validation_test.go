@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -30,8 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/policy"
-	"k8s.io/kubernetes/pkg/security/podsecuritypolicy/seccomp"
-	psputil "k8s.io/kubernetes/pkg/security/podsecuritypolicy/util"
 	"k8s.io/utils/pointer"
 )
 
@@ -373,15 +371,15 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 
 	invalidSeccompDefault := validPSP()
 	invalidSeccompDefault.Annotations = map[string]string{
-		seccomp.DefaultProfileAnnotationKey: "not-good",
+		seccompDefaultProfileAnnotationKey: "not-good",
 	}
 	invalidSeccompAllowAnyDefault := validPSP()
 	invalidSeccompAllowAnyDefault.Annotations = map[string]string{
-		seccomp.DefaultProfileAnnotationKey: "*",
+		seccompDefaultProfileAnnotationKey: "*",
 	}
 	invalidSeccompAllowed := validPSP()
 	invalidSeccompAllowed.Annotations = map[string]string{
-		seccomp.AllowedProfilesAnnotationKey: api.SeccompProfileRuntimeDefault + ",not-good",
+		seccompAllowedProfilesAnnotationKey: api.SeccompProfileRuntimeDefault + ",not-good",
 	}
 
 	invalidAllowedHostPathMissingPath := validPSP()
@@ -590,7 +588,7 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 	}
 
 	for k, v := range errorCases {
-		errs := ValidatePodSecurityPolicy(v.psp, PodSecurityPolicyValidationOptions{})
+		errs := ValidatePodSecurityPolicy(v.psp)
 		if len(errs) == 0 {
 			t.Errorf("%s expected errors but got none", k)
 			continue
@@ -613,7 +611,7 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 	// Should not be able to update to an invalid policy.
 	for k, v := range errorCases {
 		v.psp.ResourceVersion = "444" // Required for updates.
-		errs := ValidatePodSecurityPolicyUpdate(validPSP(), v.psp, PodSecurityPolicyValidationOptions{})
+		errs := ValidatePodSecurityPolicyUpdate(validPSP(), v.psp)
 		if len(errs) == 0 {
 			t.Errorf("[%s] expected update errors but got none", k)
 			continue
@@ -660,8 +658,8 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 
 	validSeccomp := validPSP()
 	validSeccomp.Annotations = map[string]string{
-		seccomp.DefaultProfileAnnotationKey:  api.SeccompProfileRuntimeDefault,
-		seccomp.AllowedProfilesAnnotationKey: api.SeccompProfileRuntimeDefault + ",unconfined,localhost/foo,*",
+		seccompDefaultProfileAnnotationKey:  api.SeccompProfileRuntimeDefault,
+		seccompAllowedProfilesAnnotationKey: api.SeccompProfileRuntimeDefault + ",unconfined,localhost/foo,*",
 	}
 
 	validDefaultAllowPrivilegeEscalation := validPSP()
@@ -743,13 +741,13 @@ func TestValidatePodSecurityPolicy(t *testing.T) {
 	}
 
 	for k, v := range successCases {
-		if errs := ValidatePodSecurityPolicy(v.psp, PodSecurityPolicyValidationOptions{}); len(errs) != 0 {
+		if errs := ValidatePodSecurityPolicy(v.psp); len(errs) != 0 {
 			t.Errorf("Expected success for %s, got %v", k, errs)
 		}
 
 		// Should be able to update to a valid PSP.
 		v.psp.ResourceVersion = "444" // Required for updates.
-		if errs := ValidatePodSecurityPolicyUpdate(validPSP(), v.psp, PodSecurityPolicyValidationOptions{}); len(errs) != 0 {
+		if errs := ValidatePodSecurityPolicyUpdate(validPSP(), v.psp); len(errs) != 0 {
 			t.Errorf("Expected success for %s update, got %v", k, errs)
 		}
 	}
@@ -779,14 +777,14 @@ func TestValidatePSPVolumes(t *testing.T) {
 		}
 	}
 
-	volumes := psputil.GetAllFSTypesAsSet()
+	volumes := getAllFSTypesAsSet()
 	// add in the * value since that is a pseudo type that is not included by default
 	volumes.Insert(string(policy.All))
 
 	for _, strVolume := range volumes.List() {
 		psp := validPSP()
 		psp.Spec.Volumes = []policy.FSType{policy.FSType(strVolume)}
-		errs := ValidatePodSecurityPolicy(psp, PodSecurityPolicyValidationOptions{AllowEphemeralVolumeType: true})
+		errs := ValidatePodSecurityPolicy(psp)
 		if len(errs) != 0 {
 			t.Errorf("%s validation expected no errors but received %v", strVolume, errs)
 		}
@@ -834,12 +832,12 @@ func TestIsValidSysctlPattern(t *testing.T) {
 		}(256),
 	}
 	for _, s := range valid {
-		if !IsValidSysctlPattern(s) {
+		if !IsValidSysctlPattern(s, false) {
 			t.Errorf("%q expected to be a valid sysctl pattern", s)
 		}
 	}
 	for _, s := range invalid {
-		if IsValidSysctlPattern(s) {
+		if IsValidSysctlPattern(s, false) {
 			t.Errorf("%q expected to be an invalid sysctl pattern", s)
 		}
 	}
@@ -1118,34 +1116,25 @@ func TestAllowEphemeralVolumeType(t *testing.T) {
 		},
 	}
 
-	for _, allowed := range []bool{true, false} {
-		for _, oldPSPInfo := range pspInfo {
-			for _, newPSPInfo := range pspInfo {
-				oldPSP := oldPSPInfo.psp()
-				newPSP := newPSPInfo.psp()
-				if newPSP == nil {
-					continue
-				}
-
-				t.Run(fmt.Sprintf("feature enabled=%v, old PodSecurityPolicySpec %v, new PodSecurityPolicySpec %v", allowed, oldPSPInfo.description, newPSPInfo.description), func(t *testing.T) {
-					opts := PodSecurityPolicyValidationOptions{
-						AllowEphemeralVolumeType: allowed,
-					}
-					var errs field.ErrorList
-					expectErrors := newPSPInfo.hasGenericVolume && !allowed
-					if oldPSP == nil {
-						errs = ValidatePodSecurityPolicy(newPSP, opts)
-					} else {
-						errs = ValidatePodSecurityPolicyUpdate(oldPSP, newPSP, opts)
-					}
-					if expectErrors && len(errs) == 0 {
-						t.Error("expected errors, got none")
-					}
-					if !expectErrors && len(errs) > 0 {
-						t.Errorf("expected no errors, got: %v", errs)
-					}
-				})
+	for _, oldPSPInfo := range pspInfo {
+		for _, newPSPInfo := range pspInfo {
+			oldPSP := oldPSPInfo.psp()
+			newPSP := newPSPInfo.psp()
+			if newPSP == nil {
+				continue
 			}
+
+			t.Run(fmt.Sprintf("old PodSecurityPolicySpec %v, new PodSecurityPolicySpec %v", oldPSPInfo.description, newPSPInfo.description), func(t *testing.T) {
+				var errs field.ErrorList
+				if oldPSP == nil {
+					errs = ValidatePodSecurityPolicy(newPSP)
+				} else {
+					errs = ValidatePodSecurityPolicyUpdate(oldPSP, newPSP)
+				}
+				if len(errs) > 0 {
+					t.Errorf("expected no errors, got: %v", errs)
+				}
+			})
 		}
 	}
 }

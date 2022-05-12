@@ -162,20 +162,6 @@ func (svcStrategy) AllowUnconditionalUpdate() bool {
 //         newSvc.Spec.MyFeature = nil
 //     }
 func dropServiceDisabledFields(newSvc *api.Service, oldSvc *api.Service) {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.IPv6DualStack) && !serviceDualStackFieldsInUse(oldSvc) {
-		newSvc.Spec.IPFamilies = nil
-		newSvc.Spec.IPFamilyPolicy = nil
-		if len(newSvc.Spec.ClusterIPs) > 1 {
-			newSvc.Spec.ClusterIPs = newSvc.Spec.ClusterIPs[0:1]
-		}
-	}
-
-	// Clear AllocateLoadBalancerNodePorts if ServiceLBNodePortControl is not enabled
-	if !utilfeature.DefaultFeatureGate.Enabled(features.ServiceLBNodePortControl) {
-		if !allocateLoadBalancerNodePortsInUse(oldSvc) {
-			newSvc.Spec.AllocateLoadBalancerNodePorts = nil
-		}
-	}
 
 	if !utilfeature.DefaultFeatureGate.Enabled(features.MixedProtocolLBService) {
 		if !serviceConditionsInUse(oldSvc) {
@@ -188,40 +174,12 @@ func dropServiceDisabledFields(newSvc *api.Service, oldSvc *api.Service) {
 		}
 	}
 
-	// Drop LoadBalancerClass if LoadBalancerClass is not enabled
-	if !utilfeature.DefaultFeatureGate.Enabled(features.ServiceLoadBalancerClass) {
-		if !loadBalancerClassInUse(oldSvc) {
-			newSvc.Spec.LoadBalancerClass = nil
-		}
-	}
-
 	// Clear InternalTrafficPolicy if not enabled
 	if !utilfeature.DefaultFeatureGate.Enabled(features.ServiceInternalTrafficPolicy) {
 		if !serviceInternalTrafficPolicyInUse(oldSvc) {
 			newSvc.Spec.InternalTrafficPolicy = nil
 		}
 	}
-}
-
-// returns true if svc.Spec.AllocateLoadBalancerNodePorts field is in use
-func allocateLoadBalancerNodePortsInUse(svc *api.Service) bool {
-	if svc == nil {
-		return false
-	}
-	return svc.Spec.AllocateLoadBalancerNodePorts != nil
-}
-
-// returns true if svc.Spec.ServiceIPFamily field is in use
-func serviceDualStackFieldsInUse(svc *api.Service) bool {
-	if svc == nil {
-		return false
-	}
-
-	ipFamilyPolicyInUse := svc.Spec.IPFamilyPolicy != nil
-	ipFamiliesInUse := len(svc.Spec.IPFamilies) > 0
-	ClusterIPsInUse := len(svc.Spec.ClusterIPs) > 1
-
-	return ipFamilyPolicyInUse || ipFamiliesInUse || ClusterIPsInUse
 }
 
 // returns true when the svc.Status.Conditions field is in use.
@@ -243,14 +201,6 @@ func loadBalancerPortsInUse(svc *api.Service) bool {
 		}
 	}
 	return false
-}
-
-// returns true if svc.Spec.LoadBalancerClass field is in use
-func loadBalancerClassInUse(svc *api.Service) bool {
-	if svc == nil {
-		return false
-	}
-	return svc.Spec.LoadBalancerClass != nil
 }
 
 func serviceInternalTrafficPolicyInUse(svc *api.Service) bool {

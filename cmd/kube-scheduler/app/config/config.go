@@ -17,7 +17,10 @@ limitations under the License.
 package config
 
 import (
+	"time"
+
 	apiserver "k8s.io/apiserver/pkg/server"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
@@ -31,8 +34,6 @@ type Config struct {
 	// ComponentConfig is the scheduler server's configuration object.
 	ComponentConfig kubeschedulerconfig.KubeSchedulerConfiguration
 
-	LegacyPolicySource *kubeschedulerconfig.SchedulerPolicySource
-
 	// LoopbackClientConfig is a config for a privileged loopback connection
 	LoopbackClientConfig *restclient.Config
 
@@ -40,15 +41,22 @@ type Config struct {
 	Authorization  apiserver.AuthorizationInfo
 	SecureServing  *apiserver.SecureServingInfo
 
-	Client          clientset.Interface
-	KubeConfig      *restclient.Config
-	InformerFactory informers.SharedInformerFactory
+	Client             clientset.Interface
+	KubeConfig         *restclient.Config
+	InformerFactory    informers.SharedInformerFactory
+	DynInformerFactory dynamicinformer.DynamicSharedInformerFactory
 
-	//lint:ignore SA1019 this deprecated field still needs to be used for now. It will be removed once the migration is done.
+	//nolint:staticcheck // SA1019 this deprecated field still needs to be used for now. It will be removed once the migration is done.
 	EventBroadcaster events.EventBroadcasterAdapter
 
 	// LeaderElection is optional.
 	LeaderElection *leaderelection.LeaderElectionConfig
+
+	// PodMaxInUnschedulablePodsDuration is the maximum time a pod can stay in
+	// unschedulablePods. If a pod stays in unschedulablePods for longer than this
+	// value, the pod will be moved from unschedulablePods to backoffQ or activeQ.
+	// If this value is empty, the default value (5min) will be used.
+	PodMaxInUnschedulablePodsDuration time.Duration
 }
 
 type completedConfig struct {

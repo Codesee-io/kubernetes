@@ -18,8 +18,6 @@ package sysctl
 
 import (
 	"testing"
-
-	"k8s.io/kubernetes/pkg/security/podsecuritypolicy/sysctl"
 )
 
 func TestNewAllowlist(t *testing.T) {
@@ -29,13 +27,15 @@ func TestNewAllowlist(t *testing.T) {
 	}
 	for _, test := range []Test{
 		{sysctls: []string{"kernel.msg*", "kernel.sem"}},
+		{sysctls: []string{"kernel/msg*", "kernel/sem"}},
 		{sysctls: []string{" kernel.msg*"}, err: true},
 		{sysctls: []string{"kernel.msg* "}, err: true},
 		{sysctls: []string{"net.-"}, err: true},
 		{sysctls: []string{"net.*.foo"}, err: true},
+		{sysctls: []string{"net.*/foo"}, err: true},
 		{sysctls: []string{"foo"}, err: true},
 	} {
-		_, err := NewAllowlist(append(sysctl.SafeSysctlAllowlist(), test.sysctls...))
+		_, err := NewAllowlist(append(SafeSysctlAllowlist(), test.sysctls...))
 		if test.err && err == nil {
 			t.Errorf("expected an error creating a allowlist for %v", test.sysctls)
 		} else if !test.err && err != nil {
@@ -51,9 +51,11 @@ func TestAllowlist(t *testing.T) {
 	}
 	valid := []Test{
 		{sysctl: "kernel.shm_rmid_forced"},
+		{sysctl: "kernel/shm_rmid_forced"},
 		{sysctl: "net.ipv4.ip_local_port_range"},
 		{sysctl: "kernel.msgmax"},
 		{sysctl: "kernel.sem"},
+		{sysctl: "kernel/sem"},
 	}
 	invalid := []Test{
 		{sysctl: "kernel.shm_rmid_forced", hostIPC: true},
@@ -65,7 +67,7 @@ func TestAllowlist(t *testing.T) {
 		{sysctl: "kernel.sem", hostIPC: true},
 	}
 
-	w, err := NewAllowlist(append(sysctl.SafeSysctlAllowlist(), "kernel.msg*", "kernel.sem"))
+	w, err := NewAllowlist(append(SafeSysctlAllowlist(), "kernel.msg*", "kernel.sem"))
 	if err != nil {
 		t.Fatalf("failed to create allowlist: %v", err)
 	}

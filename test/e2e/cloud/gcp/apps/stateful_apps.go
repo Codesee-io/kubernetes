@@ -19,9 +19,11 @@ package apps
 import (
 	"k8s.io/kubernetes/test/e2e/cloud/gcp/common"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	"k8s.io/kubernetes/test/e2e/upgrades"
 	"k8s.io/kubernetes/test/e2e/upgrades/apps"
 	"k8s.io/kubernetes/test/utils/junit"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 )
@@ -34,10 +36,12 @@ var upgradeTests = []upgrades.Test{
 
 var _ = SIGDescribe("stateful Upgrade [Feature:StatefulUpgrade]", func() {
 	f := framework.NewDefaultFramework("stateful-upgrade")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	testFrameworks := upgrades.CreateUpgradeFrameworks(upgradeTests)
 
 	ginkgo.Describe("stateful upgrade", func() {
 		ginkgo.It("should maintain a functioning cluster", func() {
+			e2epv.SkipIfNoDefaultStorageClass(f.ClientSet)
 			upgCtx, err := common.GetUpgradeContext(f.ClientSet.Discovery())
 			framework.ExpectNoError(err)
 

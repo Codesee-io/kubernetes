@@ -20,7 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -51,7 +51,7 @@ func scrapeMetrics(s *httptest.Server) (testutil.Metrics, error) {
 		return nil, fmt.Errorf("Non-200 response trying to scrape metrics from API Server: %v", resp)
 	}
 	metrics := testutil.NewMetrics()
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to read response: %v", resp)
 	}
@@ -99,7 +99,7 @@ func TestAPIServerMetrics(t *testing.T) {
 	}
 
 	// Make a request to a deprecated API to ensure there's at least one data point
-	if _, err := client.PolicyV1beta1().PodSecurityPolicies().List(context.TODO(), metav1.ListOptions{}); err != nil {
+	if _, err := client.StorageV1beta1().CSIStorageCapacities("default").List(context.TODO(), metav1.ListOptions{}); err != nil {
 		t.Fatalf("unexpected error getting rbac roles: %v", err)
 	}
 

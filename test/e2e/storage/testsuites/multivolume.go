@@ -35,6 +35,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/storage/utils"
 	storageutils "k8s.io/kubernetes/test/e2e/storage/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 type multiVolumeTestSuite struct {
@@ -104,6 +105,7 @@ func (t *multiVolumeTestSuite) DefineTests(driver storageframework.TestDriver, p
 	// Beware that it also registers an AfterEach which renders f unusable. Any code using
 	// f must run inside an It or Context callback.
 	f := framework.NewFrameworkWithCustomTimeouts("multivolume", storageframework.GetDriverTimeouts(driver))
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	init := func() {
 		l = local{}
@@ -328,12 +330,6 @@ func (t *multiVolumeTestSuite) DefineTests(driver storageframework.TestDriver, p
 		if pattern.SnapshotType == "" {
 			e2eskipper.Skipf("Driver %q does not support snapshots - skipping", dInfo.Name)
 		}
-		if pattern.VolMode == v1.PersistentVolumeBlock {
-			// TODO: refactor prepareSnapshotDataSourceForProvisioning() below to use
-			// utils.CheckWriteToPath / utils.CheckReadFromPath and remove
-			// redundant InjectContent(). This will enable block volume tests.
-			e2eskipper.Skipf("This test does not support block volumes -- skipping")
-		}
 
 		// Create a volume
 		testVolumeSizeRange := t.GetTestSuiteInfo().SupportedSizeRange
@@ -379,18 +375,12 @@ func (t *multiVolumeTestSuite) DefineTests(driver storageframework.TestDriver, p
 	// [        node1        ]
 	//   |                 |     <- same volume mode
 	// [volume1]   ->  [cloned volume1]
-	ginkgo.It("should concurrently access the volume and its clone from pods on the same node [LinuxOnly][Feature:VolumeSnapshotDataSource][Feature:VolumeSourceXFS]", func() {
+	ginkgo.It("should concurrently access the volume and its clone from pods on the same node [LinuxOnly][Feature:VolumeSourceXFS]", func() {
 		init()
 		defer cleanup()
 
 		if !l.driver.GetDriverInfo().Capabilities[storageframework.CapPVCDataSource] {
 			e2eskipper.Skipf("Driver %q does not support volume clone - skipping", dInfo.Name)
-		}
-		if pattern.VolMode == v1.PersistentVolumeBlock {
-			// TODO: refactor preparePVCDataSourceForProvisioning() below to use
-			// utils.CheckWriteToPath / utils.CheckReadFromPath and remove
-			// redundant InjectContent(). This will enable block volume tests.
-			e2eskipper.Skipf("This test does not support block volumes -- skipping")
 		}
 
 		// Create a volume
@@ -711,15 +701,26 @@ func TestConcurrentAccessToRelatedVolumes(f *framework.Framework, cs clientset.I
 		e2epod.SetAffinity(&node, actualNodeName)
 	}
 
-	// Check that all pods the same content
-	for i, pod := range pods {
-		fileName := "/mnt/volume1/index.html"
-		index := i + 1
+	for i, pvc := range pvcs {
+		var commands []string
 
-		ginkgo.By(fmt.Sprintf("Checking if the volume in pod%d has expected initial content", index))
-		commands := e2evolume.GenerateReadFileCmd(fileName)
-		_, err := framework.LookForStringInPodExec(pod.Namespace, pod.Name, commands, expectedContent, time.Minute)
-		framework.ExpectNoError(err, "failed: finding the contents of the mounted file %s.", fileName)
+		if *pvc.Spec.VolumeMode == v1.PersistentVolumeBlock {
+			fileName := "/mnt/volume1"
+			commands = e2evolume.GenerateReadBlockCmd(fileName, len(expectedContent))
+			// Check that all pods have the same content
+			index := i + 1
+			ginkgo.By(fmt.Sprintf("Checking if the volume in pod%d has expected initial content", index))
+			_, err := framework.LookForStringInPodExec(pods[i].Namespace, pods[i].Name, commands, expectedContent, time.Minute)
+			framework.ExpectNoError(err, "failed: finding the contents of the block volume %s.", fileName)
+		} else {
+			fileName := "/mnt/volume1/index.html"
+			commands = e2evolume.GenerateReadFileCmd(fileName)
+			// Check that all pods have the same content
+			index := i + 1
+			ginkgo.By(fmt.Sprintf("Checking if the volume in pod%d has expected initial content", index))
+			_, err := framework.LookForStringInPodExec(pods[i].Namespace, pods[i].Name, commands, expectedContent, time.Minute)
+			framework.ExpectNoError(err, "failed: finding the contents of the mounted file %s.", fileName)
+		}
 	}
 }
 

@@ -25,9 +25,9 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/component-helpers/storage/ephemeral"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config/validation"
@@ -69,11 +69,10 @@ func (d *stateData) Clone() framework.StateData {
 // In the Filter phase, pod binding cache is created for the pod and used in
 // Reserve and PreBind phases.
 type VolumeBinding struct {
-	Binder                               SchedulerVolumeBinder
-	PVCLister                            corelisters.PersistentVolumeClaimLister
-	GenericEphemeralVolumeFeatureEnabled bool
-	scorer                               volumeCapacityScorer
-	fts                                  feature.Features
+	Binder    SchedulerVolumeBinder
+	PVCLister corelisters.PersistentVolumeClaimLister
+	scorer    volumeCapacityScorer
+	fts       feature.Features
 }
 
 var _ framework.PreFilterPlugin = &VolumeBinding{}
@@ -105,17 +104,13 @@ func (pl *VolumeBinding) EventsToRegister() []framework.ClusterEvent {
 		// Pods may fail to find available PVs because the node labels do not
 		// match the storage class's allowed topologies or PV's node affinity.
 		// A new or updated node may make pods schedulable.
-		{Resource: framework.Node, ActionType: framework.Add | framework.Update},
+		{Resource: framework.Node, ActionType: framework.Add | framework.UpdateNodeLabel},
 		// We rely on CSI node to translate in-tree PV to CSI.
 		{Resource: framework.CSINode, ActionType: framework.Add | framework.Update},
-	}
-	if pl.fts.EnableCSIStorageCapacity {
 		// When CSIStorageCapacity is enabled, pods may become schedulable
 		// on CSI driver & storage capacity changes.
-		events = append(events, []framework.ClusterEvent{
-			{Resource: framework.CSIDriver, ActionType: framework.Add | framework.Update},
-			{Resource: framework.CSIStorageCapacity, ActionType: framework.Add | framework.Update},
-		}...)
+		{Resource: framework.CSIDriver, ActionType: framework.Add | framework.Update},
+		{Resource: framework.CSIStorageCapacity, ActionType: framework.Add | framework.Update},
 	}
 	return events
 }
@@ -127,13 +122,13 @@ func (pl *VolumeBinding) podHasPVCs(pod *v1.Pod) (bool, error) {
 	hasPVC := false
 	for _, vol := range pod.Spec.Volumes {
 		var pvcName string
-		ephemeral := false
+		isEphemeral := false
 		switch {
 		case vol.PersistentVolumeClaim != nil:
 			pvcName = vol.PersistentVolumeClaim.ClaimName
-		case vol.Ephemeral != nil && pl.GenericEphemeralVolumeFeatureEnabled:
-			pvcName = pod.Name + "-" + vol.Name
-			ephemeral = true
+		case vol.Ephemeral != nil:
+			pvcName = ephemeral.VolumeClaimName(pod, &vol)
+			isEphemeral = true
 		default:
 			// Volume is not using a PVC, ignore
 			continue
@@ -144,18 +139,24 @@ func (pl *VolumeBinding) podHasPVCs(pod *v1.Pod) (bool, error) {
 			// The error usually has already enough context ("persistentvolumeclaim "myclaim" not found"),
 			// but we can do better for generic ephemeral inline volumes where that situation
 			// is normal directly after creating a pod.
-			if ephemeral && apierrors.IsNotFound(err) {
+			if isEphemeral && apierrors.IsNotFound(err) {
 				err = fmt.Errorf("waiting for ephemeral volume controller to create the persistentvolumeclaim %q", pvcName)
 			}
 			return hasPVC, err
+		}
+
+		if pvc.Status.Phase == v1.ClaimLost {
+			return hasPVC, fmt.Errorf("persistentvolumeclaim %q bound to non-existent persistentvolume %q", pvc.Name, pvc.Spec.VolumeName)
 		}
 
 		if pvc.DeletionTimestamp != nil {
 			return hasPVC, fmt.Errorf("persistentvolumeclaim %q is being deleted", pvc.Name)
 		}
 
-		if ephemeral && !metav1.IsControlledBy(pvc, pod) {
-			return hasPVC, fmt.Errorf("persistentvolumeclaim %q was not created for the pod", pvc.Name)
+		if isEphemeral {
+			if err := ephemeral.VolumeIsForPod(pod, pvc); err != nil {
+				return hasPVC, err
+			}
 		}
 	}
 	return hasPVC, nil
@@ -164,17 +165,17 @@ func (pl *VolumeBinding) podHasPVCs(pod *v1.Pod) (bool, error) {
 // PreFilter invoked at the prefilter extension point to check if pod has all
 // immediate PVCs bound. If not all immediate PVCs are bound, an
 // UnschedulableAndUnresolvable is returned.
-func (pl *VolumeBinding) PreFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod) *framework.Status {
+func (pl *VolumeBinding) PreFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
 	// If pod does not reference any PVC, we don't need to do anything.
 	if hasPVC, err := pl.podHasPVCs(pod); err != nil {
-		return framework.NewStatus(framework.UnschedulableAndUnresolvable, err.Error())
+		return nil, framework.NewStatus(framework.UnschedulableAndUnresolvable, err.Error())
 	} else if !hasPVC {
 		state.Write(stateKey, &stateData{skip: true})
-		return nil
+		return nil, nil
 	}
 	boundClaims, claimsToBind, unboundClaimsImmediate, err := pl.Binder.GetPodVolumes(pod)
 	if err != nil {
-		return framework.AsStatus(err)
+		return nil, framework.AsStatus(err)
 	}
 	if len(unboundClaimsImmediate) > 0 {
 		// Return UnschedulableAndUnresolvable error if immediate claims are
@@ -182,10 +183,10 @@ func (pl *VolumeBinding) PreFilter(ctx context.Context, state *framework.CycleSt
 		// claims are bound by PV controller.
 		status := framework.NewStatus(framework.UnschedulableAndUnresolvable)
 		status.AppendReason("pod has unbound immediate PersistentVolumeClaims")
-		return status
+		return nil, status
 	}
 	state.Write(stateKey, &stateData{boundClaims: boundClaims, claimsToBind: claimsToBind, podVolumesByNode: make(map[string]*PodVolumes)})
-	return nil
+	return nil, nil
 }
 
 // PreFilterExtensions returns prefilter extensions, pod add and remove.
@@ -374,12 +375,9 @@ func New(plArgs runtime.Object, fh framework.Handle, fts feature.Features) (fram
 	pvInformer := fh.SharedInformerFactory().Core().V1().PersistentVolumes()
 	storageClassInformer := fh.SharedInformerFactory().Storage().V1().StorageClasses()
 	csiNodeInformer := fh.SharedInformerFactory().Storage().V1().CSINodes()
-	var capacityCheck *CapacityCheck
-	if fts.EnableCSIStorageCapacity {
-		capacityCheck = &CapacityCheck{
-			CSIDriverInformer:          fh.SharedInformerFactory().Storage().V1().CSIDrivers(),
-			CSIStorageCapacityInformer: fh.SharedInformerFactory().Storage().V1beta1().CSIStorageCapacities(),
-		}
+	capacityCheck := CapacityCheck{
+		CSIDriverInformer:          fh.SharedInformerFactory().Storage().V1().CSIDrivers(),
+		CSIStorageCapacityInformer: fh.SharedInformerFactory().Storage().V1().CSIStorageCapacities(),
 	}
 	binder := NewVolumeBinder(fh.ClientSet(), podInformer, nodeInformer, csiNodeInformer, pvcInformer, pvInformer, storageClassInformer, capacityCheck, time.Duration(args.BindTimeoutSeconds)*time.Second)
 
@@ -396,10 +394,9 @@ func New(plArgs runtime.Object, fh framework.Handle, fts feature.Features) (fram
 		scorer = buildScorerFunction(shape)
 	}
 	return &VolumeBinding{
-		Binder:                               binder,
-		PVCLister:                            pvcInformer.Lister(),
-		GenericEphemeralVolumeFeatureEnabled: fts.EnableGenericEphemeralVolume,
-		scorer:                               scorer,
-		fts:                                  fts,
+		Binder:    binder,
+		PVCLister: pvcInformer.Lister(),
+		scorer:    scorer,
+		fts:       fts,
 	}, nil
 }

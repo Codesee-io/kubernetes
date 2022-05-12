@@ -33,9 +33,11 @@ import (
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/utils/pointer"
 )
 
 func TestVisitContainers(t *testing.T) {
+	setAllFeatureEnabledContainersDuringTest := ContainerType(0)
 	testCases := []struct {
 		desc                       string
 		spec                       *api.PodSpec
@@ -142,7 +144,7 @@ func TestVisitContainers(t *testing.T) {
 				},
 			},
 			wantContainers: []string{"i1", "i2", "c1", "c2"},
-			mask:           AllFeatureEnabledContainers(),
+			mask:           setAllFeatureEnabledContainersDuringTest,
 		},
 		{
 			desc: "all feature enabled container types with ephemeral containers enabled",
@@ -161,7 +163,7 @@ func TestVisitContainers(t *testing.T) {
 				},
 			},
 			wantContainers:             []string{"i1", "i2", "c1", "c2", "e1", "e2"},
-			mask:                       AllFeatureEnabledContainers(),
+			mask:                       setAllFeatureEnabledContainersDuringTest,
 			ephemeralContainersEnabled: true,
 		},
 		{
@@ -187,8 +189,9 @@ func TestVisitContainers(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			if tc.ephemeralContainersEnabled {
-				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.EphemeralContainers, tc.ephemeralContainersEnabled)()
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.EphemeralContainers, tc.ephemeralContainersEnabled)()
+
+			if tc.mask == setAllFeatureEnabledContainersDuringTest {
 				tc.mask = AllFeatureEnabledContainers()
 			}
 
@@ -560,56 +563,24 @@ func TestDropFSGroupFields(t *testing.T) {
 	}
 	podInfos := []struct {
 		description                  string
-		featureEnabled               bool
 		newPodHasFSGroupChangePolicy bool
 		pod                          func() *api.Pod
 		expectPolicyInPod            bool
 	}{
 		{
 			description:                  "oldPod.FSGroupChangePolicy=nil, feature=true, newPod.FSGroupChangePolicy=true",
-			featureEnabled:               true,
 			pod:                          nofsGroupPod,
 			newPodHasFSGroupChangePolicy: true,
 			expectPolicyInPod:            true,
-		},
-		{
-			description:                  "oldPod=nil, feature=false, newPod.FSGroupChangePolicy=true",
-			featureEnabled:               false,
-			pod:                          func() *api.Pod { return nil },
-			newPodHasFSGroupChangePolicy: true,
-			expectPolicyInPod:            false,
 		},
 		{
 			description:                  "oldPod=nil, feature=true, newPod.FSGroupChangePolicy=true",
-			featureEnabled:               true,
 			pod:                          func() *api.Pod { return nil },
 			newPodHasFSGroupChangePolicy: true,
 			expectPolicyInPod:            true,
 		},
 		{
-			description:                  "oldPod.FSGroupChangePolicy=nil, feature=false, newPod.FSGroupChangePolicy=true",
-			featureEnabled:               false,
-			pod:                          nofsGroupPod,
-			newPodHasFSGroupChangePolicy: true,
-			expectPolicyInPod:            false,
-		},
-		{
-			description:                  "oldPod.FSGroupChangePolicy=true, feature=false, newPod.FSGroupChangePolicy=true",
-			featureEnabled:               false,
-			pod:                          fsGroupPod,
-			newPodHasFSGroupChangePolicy: true,
-			expectPolicyInPod:            true,
-		},
-		{
-			description:                  "oldPod.FSGroupChangePolicy=true, feature=false, newPod.FSGroupChangePolicy=false",
-			featureEnabled:               false,
-			pod:                          fsGroupPod,
-			newPodHasFSGroupChangePolicy: false,
-			expectPolicyInPod:            false,
-		},
-		{
 			description:                  "oldPod.FSGroupChangePolicy=true, feature=true, newPod.FSGroupChangePolicy=false",
-			featureEnabled:               true,
 			pod:                          fsGroupPod,
 			newPodHasFSGroupChangePolicy: false,
 			expectPolicyInPod:            false,
@@ -617,7 +588,6 @@ func TestDropFSGroupFields(t *testing.T) {
 	}
 	for _, podInfo := range podInfos {
 		t.Run(podInfo.description, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ConfigurableFSGroupPolicy, podInfo.featureEnabled)()
 			oldPod := podInfo.pod()
 			newPod := oldPod.DeepCopy()
 			if oldPod == nil && podInfo.newPodHasFSGroupChangePolicy {
@@ -650,100 +620,6 @@ func TestDropFSGroupFields(t *testing.T) {
 		})
 	}
 
-}
-
-func TestDropSubPath(t *testing.T) {
-	podWithSubpaths := func() *api.Pod {
-		return &api.Pod{
-			Spec: api.PodSpec{
-				RestartPolicy:  api.RestartPolicyNever,
-				Containers:     []api.Container{{Name: "container1", Image: "testimage", VolumeMounts: []api.VolumeMount{{Name: "a", SubPath: "foo"}, {Name: "a", SubPath: "foo2"}, {Name: "a", SubPath: "foo3"}}}},
-				InitContainers: []api.Container{{Name: "container1", Image: "testimage", VolumeMounts: []api.VolumeMount{{Name: "a", SubPath: "foo"}, {Name: "a", SubPath: "foo2"}}}},
-				Volumes:        []api.Volume{{Name: "a", VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{Path: "/dev/xvdc"}}}},
-			},
-		}
-	}
-	podWithoutSubpaths := func() *api.Pod {
-		return &api.Pod{
-			Spec: api.PodSpec{
-				RestartPolicy:  api.RestartPolicyNever,
-				Containers:     []api.Container{{Name: "container1", Image: "testimage", VolumeMounts: []api.VolumeMount{{Name: "a", SubPath: ""}, {Name: "a", SubPath: ""}, {Name: "a", SubPath: ""}}}},
-				InitContainers: []api.Container{{Name: "container1", Image: "testimage", VolumeMounts: []api.VolumeMount{{Name: "a", SubPath: ""}, {Name: "a", SubPath: ""}}}},
-				Volumes:        []api.Volume{{Name: "a", VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{Path: "/dev/xvdc"}}}},
-			},
-		}
-	}
-
-	podInfo := []struct {
-		description string
-		hasSubpaths bool
-		pod         func() *api.Pod
-	}{
-		{
-			description: "has subpaths",
-			hasSubpaths: true,
-			pod:         podWithSubpaths,
-		},
-		{
-			description: "does not have subpaths",
-			hasSubpaths: false,
-			pod:         podWithoutSubpaths,
-		},
-		{
-			description: "is nil",
-			hasSubpaths: false,
-			pod:         func() *api.Pod { return nil },
-		},
-	}
-
-	for _, enabled := range []bool{true, false} {
-		for _, oldPodInfo := range podInfo {
-			for _, newPodInfo := range podInfo {
-				oldPodHasSubpaths, oldPod := oldPodInfo.hasSubpaths, oldPodInfo.pod()
-				newPodHasSubpaths, newPod := newPodInfo.hasSubpaths, newPodInfo.pod()
-				if newPod == nil {
-					continue
-				}
-
-				t.Run(fmt.Sprintf("feature enabled=%v, old pod %v, new pod %v", enabled, oldPodInfo.description, newPodInfo.description), func(t *testing.T) {
-					defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.VolumeSubpath, enabled)()
-
-					var oldPodSpec *api.PodSpec
-					if oldPod != nil {
-						oldPodSpec = &oldPod.Spec
-					}
-					dropDisabledFields(&newPod.Spec, nil, oldPodSpec, nil)
-
-					// old pod should never be changed
-					if !reflect.DeepEqual(oldPod, oldPodInfo.pod()) {
-						t.Errorf("old pod changed: %v", cmp.Diff(oldPod, oldPodInfo.pod()))
-					}
-
-					switch {
-					case enabled || oldPodHasSubpaths:
-						// new pod should not be changed if the feature is enabled, or if the old pod had subpaths
-						if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
-							t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
-						}
-					case newPodHasSubpaths:
-						// new pod should be changed
-						if reflect.DeepEqual(newPod, newPodInfo.pod()) {
-							t.Errorf("new pod was not changed")
-						}
-						// new pod should not have subpaths
-						if !reflect.DeepEqual(newPod, podWithoutSubpaths()) {
-							t.Errorf("new pod had subpaths: %v", cmp.Diff(newPod, podWithoutSubpaths()))
-						}
-					default:
-						// new pod should not need to be changed
-						if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
-							t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
-						}
-					}
-				})
-			}
-		}
-	}
 }
 
 func TestDropProcMount(t *testing.T) {
@@ -1046,100 +922,6 @@ func TestDropAppArmor(t *testing.T) {
 	}
 }
 
-func TestDropSubPathExpr(t *testing.T) {
-	podWithSubpaths := func() *api.Pod {
-		return &api.Pod{
-			Spec: api.PodSpec{
-				RestartPolicy:  api.RestartPolicyNever,
-				Containers:     []api.Container{{Name: "container1", Image: "testimage", VolumeMounts: []api.VolumeMount{{Name: "a", SubPathExpr: "foo"}, {Name: "a", SubPathExpr: "foo2"}, {Name: "a", SubPathExpr: "foo3"}}}},
-				InitContainers: []api.Container{{Name: "container1", Image: "testimage", VolumeMounts: []api.VolumeMount{{Name: "a", SubPathExpr: "foo"}, {Name: "a", SubPathExpr: "foo2"}}}},
-				Volumes:        []api.Volume{{Name: "a", VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{Path: "/dev/xvdc"}}}},
-			},
-		}
-	}
-	podWithoutSubpaths := func() *api.Pod {
-		return &api.Pod{
-			Spec: api.PodSpec{
-				RestartPolicy:  api.RestartPolicyNever,
-				Containers:     []api.Container{{Name: "container1", Image: "testimage", VolumeMounts: []api.VolumeMount{{Name: "a", SubPathExpr: ""}, {Name: "a", SubPathExpr: ""}, {Name: "a", SubPathExpr: ""}}}},
-				InitContainers: []api.Container{{Name: "container1", Image: "testimage", VolumeMounts: []api.VolumeMount{{Name: "a", SubPathExpr: ""}, {Name: "a", SubPathExpr: ""}}}},
-				Volumes:        []api.Volume{{Name: "a", VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{Path: "/dev/xvdc"}}}},
-			},
-		}
-	}
-
-	podInfo := []struct {
-		description string
-		hasSubpaths bool
-		pod         func() *api.Pod
-	}{
-		{
-			description: "has subpaths",
-			hasSubpaths: true,
-			pod:         podWithSubpaths,
-		},
-		{
-			description: "does not have subpaths",
-			hasSubpaths: false,
-			pod:         podWithoutSubpaths,
-		},
-		{
-			description: "is nil",
-			hasSubpaths: false,
-			pod:         func() *api.Pod { return nil },
-		},
-	}
-
-	for _, enabled := range []bool{true, false} {
-		for _, oldPodInfo := range podInfo {
-			for _, newPodInfo := range podInfo {
-				oldPodHasSubpaths, oldPod := oldPodInfo.hasSubpaths, oldPodInfo.pod()
-				newPodHasSubpaths, newPod := newPodInfo.hasSubpaths, newPodInfo.pod()
-				if newPod == nil {
-					continue
-				}
-
-				t.Run(fmt.Sprintf("feature enabled=%v, old pod %v, new pod %v", enabled, oldPodInfo.description, newPodInfo.description), func(t *testing.T) {
-					defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.VolumeSubpath, enabled)()
-
-					var oldPodSpec *api.PodSpec
-					if oldPod != nil {
-						oldPodSpec = &oldPod.Spec
-					}
-					dropDisabledFields(&newPod.Spec, nil, oldPodSpec, nil)
-
-					// old pod should never be changed
-					if !reflect.DeepEqual(oldPod, oldPodInfo.pod()) {
-						t.Errorf("old pod changed: %v", cmp.Diff(oldPod, oldPodInfo.pod()))
-					}
-
-					switch {
-					case enabled || oldPodHasSubpaths:
-						// new pod should not be changed if the feature is enabled, or if the old pod had subpaths
-						if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
-							t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
-						}
-					case newPodHasSubpaths:
-						// new pod should be changed
-						if reflect.DeepEqual(newPod, newPodInfo.pod()) {
-							t.Errorf("new pod was not changed")
-						}
-						// new pod should not have subpaths
-						if !reflect.DeepEqual(newPod, podWithoutSubpaths()) {
-							t.Errorf("new pod had subpaths: %v", cmp.Diff(newPod, podWithoutSubpaths()))
-						}
-					default:
-						// new pod should not need to be changed
-						if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
-							t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
-						}
-					}
-				})
-			}
-		}
-	}
-}
-
 func TestDropProbeGracePeriod(t *testing.T) {
 	podWithProbeGracePeriod := func() *api.Pod {
 		livenessGracePeriod := int64(10)
@@ -1238,107 +1020,6 @@ func TestDropProbeGracePeriod(t *testing.T) {
 				})
 			}
 		}
-	}
-}
-
-// helper creates a podStatus with list of PodIPs
-func makePodStatus(podIPs []api.PodIP) *api.PodStatus {
-	return &api.PodStatus{
-		PodIPs: podIPs,
-	}
-}
-
-func TestDropStatusPodIPs(t *testing.T) {
-	testCases := []struct {
-		name             string
-		podStatus        *api.PodStatus
-		oldPodStatus     *api.PodStatus
-		comparePodStatus *api.PodStatus
-		enableDualStack  bool
-	}{
-		{
-			name:             "nil pod ips",
-			enableDualStack:  false,
-			podStatus:        makePodStatus(nil),
-			oldPodStatus:     nil,
-			comparePodStatus: makePodStatus(nil),
-		},
-		{
-			name:             "empty pod ips",
-			enableDualStack:  false,
-			podStatus:        makePodStatus([]api.PodIP{}),
-			oldPodStatus:     nil,
-			comparePodStatus: makePodStatus([]api.PodIP{}),
-		},
-		{
-			name:             "single family ipv6",
-			enableDualStack:  false,
-			podStatus:        makePodStatus([]api.PodIP{{IP: "::1"}}),
-			comparePodStatus: makePodStatus([]api.PodIP{{IP: "::1"}}),
-		},
-		{
-			name:             "single family ipv4",
-			enableDualStack:  false,
-			podStatus:        makePodStatus([]api.PodIP{{IP: "1.1.1.1"}}),
-			comparePodStatus: makePodStatus([]api.PodIP{{IP: "1.1.1.1"}}),
-		},
-		{
-			name:             "dualstack 4-6",
-			enableDualStack:  true,
-			podStatus:        makePodStatus([]api.PodIP{{IP: "1.1.1.1"}, {IP: "::1"}}),
-			comparePodStatus: makePodStatus([]api.PodIP{{IP: "1.1.1.1"}, {IP: "::1"}}),
-		},
-		{
-			name:             "dualstack 6-4",
-			enableDualStack:  true,
-			podStatus:        makePodStatus([]api.PodIP{{IP: "::1"}, {IP: "1.1.1.1"}}),
-			comparePodStatus: makePodStatus([]api.PodIP{{IP: "::1"}, {IP: "1.1.1.1"}}),
-		},
-		{
-			name:             "not dualstack 6-4=>4only",
-			enableDualStack:  false,
-			podStatus:        makePodStatus([]api.PodIP{{IP: "::1"}, {IP: "1.1.1.1"}}),
-			oldPodStatus:     nil,
-			comparePodStatus: makePodStatus([]api.PodIP{{IP: "::1"}}),
-		},
-		{
-			name:             "not dualstack 6-4=>as is (used in old)",
-			enableDualStack:  false,
-			podStatus:        makePodStatus([]api.PodIP{{IP: "::1"}, {IP: "1.1.1.1"}}),
-			oldPodStatus:     makePodStatus([]api.PodIP{{IP: "::1"}, {IP: "1.1.1.1"}}),
-			comparePodStatus: makePodStatus([]api.PodIP{{IP: "::1"}, {IP: "1.1.1.1"}}),
-		},
-		{
-			name:             "not dualstack 6-4=>6only",
-			enableDualStack:  false,
-			podStatus:        makePodStatus([]api.PodIP{{IP: "::1"}, {IP: "1.1.1.1"}}),
-			oldPodStatus:     nil,
-			comparePodStatus: makePodStatus([]api.PodIP{{IP: "::1"}}),
-		},
-		{
-			name:             "not dualstack 6-4=>as is (used in old)",
-			enableDualStack:  false,
-			podStatus:        makePodStatus([]api.PodIP{{IP: "::1"}, {IP: "1.1.1.1"}}),
-			oldPodStatus:     makePodStatus([]api.PodIP{{IP: "::1"}, {IP: "1.1.1.1"}}),
-			comparePodStatus: makePodStatus([]api.PodIP{{IP: "::1"}, {IP: "1.1.1.1"}}),
-		},
-	}
-
-	for _, tc := range testCases {
-		func() {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, tc.enableDualStack)()
-			dropPodStatusDisabledFields(tc.podStatus, tc.oldPodStatus)
-
-			old := tc.oldPodStatus.DeepCopy()
-			// old pod status should never be changed
-			if !reflect.DeepEqual(tc.oldPodStatus, old) {
-				t.Errorf("%v: old pod status changed: %v", tc.name, cmp.Diff(tc.oldPodStatus, old))
-			}
-
-			if !reflect.DeepEqual(tc.podStatus, tc.comparePodStatus) {
-				t.Errorf("%v: unexpected pod status: %v", tc.name, cmp.Diff(tc.podStatus, tc.comparePodStatus))
-			}
-		}()
 	}
 }
 
@@ -1839,7 +1520,7 @@ func TestHaveSameExpandedDNSConfig(t *testing.T) {
 	}
 }
 
-func TestDropDisabledPodAffinityTermFields(t *testing.T) {
+func TestDropDisabledTopologySpreadConstraintsFields(t *testing.T) {
 	testCases := []struct {
 		name        string
 		enabled     bool
@@ -1848,148 +1529,484 @@ func TestDropDisabledPodAffinityTermFields(t *testing.T) {
 		wantPodSpec *api.PodSpec
 	}{
 		{
-			name:        "nil affinity",
+			name:        "TopologySpreadConstraints is nil",
 			podSpec:     &api.PodSpec{},
+			oldPodSpec:  &api.PodSpec{},
 			wantPodSpec: &api.PodSpec{},
 		},
 		{
-			name:        "empty affinity",
-			podSpec:     &api.PodSpec{Affinity: &api.Affinity{}},
-			wantPodSpec: &api.PodSpec{Affinity: &api.Affinity{}},
+			name:        "TopologySpreadConstraints is empty",
+			podSpec:     &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{}},
+			oldPodSpec:  &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{}},
+			wantPodSpec: &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{}},
 		},
 		{
-			name: "NamespaceSelector cleared",
-			podSpec: &api.PodSpec{Affinity: &api.Affinity{
-				PodAffinity: &api.PodAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns1"}, TopologyKey: "region1", NamespaceSelector: &metav1.LabelSelector{}},
-					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns2"}, TopologyKey: "region2", NamespaceSelector: &metav1.LabelSelector{}}},
-					},
+			name: "TopologySpreadConstraints is not empty, but all constraints don't have minDomains",
+			podSpec: &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{
+				{
+					MinDomains: nil,
 				},
-				PodAntiAffinity: &api.PodAntiAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns3"}, TopologyKey: "region3", NamespaceSelector: &metav1.LabelSelector{}},
-					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns4"}, TopologyKey: "region4", NamespaceSelector: &metav1.LabelSelector{}}},
-					},
+				{
+					MinDomains: nil,
 				},
 			}},
-			oldPodSpec: &api.PodSpec{Affinity: &api.Affinity{}},
-			wantPodSpec: &api.PodSpec{Affinity: &api.Affinity{
-				PodAffinity: &api.PodAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns1"}, TopologyKey: "region1"},
-					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns2"}, TopologyKey: "region2"}},
-					},
+			oldPodSpec: &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{
+				{
+					MinDomains: nil,
 				},
-				PodAntiAffinity: &api.PodAntiAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns3"}, TopologyKey: "region3"},
-					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns4"}, TopologyKey: "region4"}},
-					},
+				{
+					MinDomains: nil,
+				},
+			}},
+			wantPodSpec: &api.PodSpec{TopologySpreadConstraints: []api.TopologySpreadConstraint{
+				{
+					MinDomains: nil,
+				},
+				{
+					MinDomains: nil,
 				},
 			}},
 		},
 		{
-			name: "NamespaceSelector not cleared since old spec already sets it",
-			podSpec: &api.PodSpec{Affinity: &api.Affinity{
-				PodAffinity: &api.PodAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns1"}, TopologyKey: "region1", NamespaceSelector: &metav1.LabelSelector{}},
+			name: "one constraint in podSpec has non-empty minDomains, feature gate is disabled " +
+				"and all constraint in oldPodSpec doesn't have minDomains",
+			enabled: false,
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						MinDomains: pointer.Int32(2),
 					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns2"}, TopologyKey: "region2", NamespaceSelector: &metav1.LabelSelector{}}},
-					},
-				},
-				PodAntiAffinity: &api.PodAntiAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns3"}, TopologyKey: "region3", NamespaceSelector: &metav1.LabelSelector{}},
-					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns4"}, TopologyKey: "region4", NamespaceSelector: &metav1.LabelSelector{}}},
+					{
+						MinDomains: nil,
 					},
 				},
-			}},
-			oldPodSpec: &api.PodSpec{Affinity: &api.Affinity{
-				PodAffinity: &api.PodAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns1"}, TopologyKey: "region1", NamespaceSelector: &metav1.LabelSelector{}},
+			},
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						MinDomains: nil,
+					},
+					{
+						MinDomains: nil,
 					},
 				},
-			}},
-			wantPodSpec: &api.PodSpec{Affinity: &api.Affinity{
-				PodAffinity: &api.PodAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns1"}, TopologyKey: "region1", NamespaceSelector: &metav1.LabelSelector{}},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						// cleared.
+						MinDomains: nil,
 					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns2"}, TopologyKey: "region2", NamespaceSelector: &metav1.LabelSelector{}}},
-					},
-				},
-				PodAntiAffinity: &api.PodAntiAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns3"}, TopologyKey: "region3", NamespaceSelector: &metav1.LabelSelector{}},
-					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns4"}, TopologyKey: "region4", NamespaceSelector: &metav1.LabelSelector{}}},
+					{
+						MinDomains: nil,
 					},
 				},
-			}},
+			},
 		},
 		{
-			name:    "NamespaceSelector not cleared since feature is enabled",
+			name: "one constraint in podSpec has non-empty minDomains, feature gate is disabled " +
+				"and one constraint in oldPodSpec has minDomains",
+			enabled: false,
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						MinDomains: pointer.Int32(2),
+					},
+					{
+						MinDomains: nil,
+					},
+				},
+			},
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						MinDomains: pointer.Int32(2),
+					},
+					{
+						MinDomains: nil,
+					},
+				},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						// not cleared.
+						MinDomains: pointer.Int32(2),
+					},
+					{
+						MinDomains: nil,
+					},
+				},
+			},
+		},
+		{
+			name: "one constraint in podSpec has non-empty minDomains, feature gate is enabled" +
+				"and all constraint in oldPodSpec doesn't have minDomains",
 			enabled: true,
-			podSpec: &api.PodSpec{Affinity: &api.Affinity{
-				PodAffinity: &api.PodAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns1"}, TopologyKey: "region1", NamespaceSelector: &metav1.LabelSelector{}},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						MinDomains: pointer.Int32(2),
 					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns2"}, TopologyKey: "region2", NamespaceSelector: &metav1.LabelSelector{}}},
-					},
-				},
-				PodAntiAffinity: &api.PodAntiAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns3"}, TopologyKey: "region3", NamespaceSelector: &metav1.LabelSelector{}},
-					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns4"}, TopologyKey: "region4", NamespaceSelector: &metav1.LabelSelector{}}},
+					{
+						MinDomains: nil,
 					},
 				},
-			}},
-			wantPodSpec: &api.PodSpec{Affinity: &api.Affinity{
-				PodAffinity: &api.PodAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns1"}, TopologyKey: "region1", NamespaceSelector: &metav1.LabelSelector{}},
+			},
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						MinDomains: nil,
 					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns2"}, TopologyKey: "region2", NamespaceSelector: &metav1.LabelSelector{}}},
-					},
-				},
-				PodAntiAffinity: &api.PodAntiAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []api.PodAffinityTerm{
-						{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns3"}, TopologyKey: "region3", NamespaceSelector: &metav1.LabelSelector{}},
-					},
-					PreferredDuringSchedulingIgnoredDuringExecution: []api.WeightedPodAffinityTerm{
-						{PodAffinityTerm: api.PodAffinityTerm{LabelSelector: &metav1.LabelSelector{}, Namespaces: []string{"ns4"}, TopologyKey: "region4", NamespaceSelector: &metav1.LabelSelector{}}},
+					{
+						MinDomains: nil,
 					},
 				},
-			}},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						// not cleared.
+						MinDomains: pointer.Int32(2),
+					},
+					{
+						MinDomains: nil,
+					},
+				},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MinDomainsInPodTopologySpread, tc.enabled)()
+			dropDisabledFields(tc.podSpec, nil, tc.oldPodSpec, nil)
+			if diff := cmp.Diff(tc.wantPodSpec, tc.podSpec); diff != "" {
+				t.Errorf("unexpected pod spec (-want, +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestDropOSField(t *testing.T) {
+	podWithOSField := func() *api.Pod {
+		osField := api.PodOS{Name: "linux"}
+		return &api.Pod{
+			Spec: api.PodSpec{
+				OS: &osField,
+			},
+		}
+	}
+	podWithoutOSField := func() *api.Pod { return &api.Pod{} }
+	podInfo := []struct {
+		description   string
+		hasPodOSField bool
+		pod           func() *api.Pod
+	}{
+		{
+			description:   "has PodOS field",
+			hasPodOSField: true,
+			pod:           podWithOSField,
+		},
+		{
+			description:   "does not have PodOS field",
+			hasPodOSField: false,
+			pod:           podWithoutOSField,
+		},
+		{
+			description:   "is nil",
+			hasPodOSField: false,
+			pod:           func() *api.Pod { return nil },
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodAffinityNamespaceSelector, tc.enabled)()
-			dropDisabledPodAffinityTermFields(tc.podSpec, tc.oldPodSpec)
-			if diff := cmp.Diff(tc.wantPodSpec, tc.podSpec); diff != "" {
+	for _, enabled := range []bool{true, false} {
+		for _, oldPodInfo := range podInfo {
+			for _, newPodInfo := range podInfo {
+				oldPodHasOsField, oldPod := oldPodInfo.hasPodOSField, oldPodInfo.pod()
+				newPodHasOSField, newPod := newPodInfo.hasPodOSField, newPodInfo.pod()
+				if newPod == nil {
+					continue
+				}
+
+				t.Run(fmt.Sprintf("feature enabled=%v, old pod %v, new pod %v", enabled, oldPodInfo.description, newPodInfo.description), func(t *testing.T) {
+					defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IdentifyPodOS, enabled)()
+
+					var oldPodSpec *api.PodSpec
+					if oldPod != nil {
+						oldPodSpec = &oldPod.Spec
+					}
+					dropDisabledFields(&newPod.Spec, nil, oldPodSpec, nil)
+
+					// old pod should never be changed
+					if !reflect.DeepEqual(oldPod, oldPodInfo.pod()) {
+						t.Errorf("old pod changed: %v", cmp.Diff(oldPod, oldPodInfo.pod()))
+					}
+
+					switch {
+					case enabled || oldPodHasOsField:
+						// new pod should not be changed if the feature is enabled, or if the old pod had subpaths
+						if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
+							t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
+						}
+					case newPodHasOSField:
+						// new pod should be changed
+						if reflect.DeepEqual(newPod, newPodInfo.pod()) {
+							t.Errorf("new pod was not changed")
+						}
+						// new pod should not have OSfield
+						if !reflect.DeepEqual(newPod, podWithoutOSField()) {
+							t.Errorf("new pod has OS field: %v", cmp.Diff(newPod, podWithoutOSField()))
+						}
+					default:
+						// new pod should not need to be changed
+						if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
+							t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestDropNodeInclusionPolicyFields(t *testing.T) {
+	ignore := api.NodeInclusionPolicyIgnore
+	honor := api.NodeInclusionPolicyHonor
+
+	tests := []struct {
+		name        string
+		enabled     bool
+		podSpec     *api.PodSpec
+		oldPodSpec  *api.PodSpec
+		wantPodSpec *api.PodSpec
+	}{
+		{
+			name:    "feature disabled, both pods don't use the fields",
+			enabled: false,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+		},
+		{
+			name:    "feature disabled, only old pod use NodeAffinityPolicy field",
+			enabled: false,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{NodeAffinityPolicy: &honor},
+				},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+		},
+		{
+			name:    "feature disabled, only old pod use NodeTaintsPolicy field",
+			enabled: false,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{NodeTaintsPolicy: &ignore},
+				},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+		},
+		{
+			name:    "feature disabled, only current pod use NodeAffinityPolicy field",
+			enabled: false,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{NodeAffinityPolicy: &honor},
+				},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{{
+					NodeAffinityPolicy: nil,
+				}},
+			},
+		},
+		{
+			name:    "feature disabled, only current pod use NodeTaintsPolicy field",
+			enabled: false,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{NodeTaintsPolicy: &ignore},
+				},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{NodeTaintsPolicy: nil},
+				},
+			},
+		},
+		{
+			name:    "feature disabled, both pods use NodeAffinityPolicy fields",
+			enabled: false,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{NodeAffinityPolicy: &honor},
+				},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{NodeAffinityPolicy: &ignore},
+				},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{NodeAffinityPolicy: &ignore},
+				},
+			},
+		},
+		{
+			name:    "feature disabled, both pods use NodeTaintsPolicy fields",
+			enabled: false,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{NodeTaintsPolicy: &ignore},
+				},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{NodeTaintsPolicy: &honor},
+				},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{NodeTaintsPolicy: &honor},
+				},
+			},
+		},
+		{
+			name:    "feature enabled, both pods use the fields",
+			enabled: true,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						NodeAffinityPolicy: &ignore,
+						NodeTaintsPolicy:   &honor,
+					},
+				},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						NodeAffinityPolicy: &honor,
+						NodeTaintsPolicy:   &ignore,
+					},
+				},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						NodeAffinityPolicy: &honor,
+						NodeTaintsPolicy:   &ignore,
+					},
+				},
+			},
+		},
+		{
+			name:    "feature enabled, only old pod use NodeAffinityPolicy field",
+			enabled: true,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						NodeAffinityPolicy: &honor,
+					},
+				},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+		},
+		{
+			name:    "feature enabled, only old pod use NodeTaintsPolicy field",
+			enabled: true,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						NodeTaintsPolicy: &ignore,
+					},
+				},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+		},
+		{
+			name:    "feature enabled, only current pod use NodeAffinityPolicy field",
+			enabled: true,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						NodeAffinityPolicy: &ignore,
+					},
+				},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						NodeAffinityPolicy: &ignore,
+					},
+				},
+			},
+		},
+		{
+			name:    "feature enabled, only current pod use NodeTaintsPolicy field",
+			enabled: true,
+			oldPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{},
+			},
+			podSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						NodeTaintsPolicy: &honor,
+					},
+				},
+			},
+			wantPodSpec: &api.PodSpec{
+				TopologySpreadConstraints: []api.TopologySpreadConstraint{
+					{
+						NodeTaintsPolicy: &honor,
+					},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, test.enabled)()
+
+			dropDisabledFields(test.podSpec, nil, test.oldPodSpec, nil)
+			if diff := cmp.Diff(test.wantPodSpec, test.podSpec); diff != "" {
 				t.Errorf("unexpected pod spec (-want, +got):\n%s", diff)
 			}
 		})

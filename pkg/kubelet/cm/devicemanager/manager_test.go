@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	cadvisorapi "github.com/google/cadvisor/info/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
@@ -39,6 +40,7 @@ import (
 	watcherapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	"k8s.io/kubernetes/pkg/kubelet/cm/devicemanager/checkpoint"
+	plugin "k8s.io/kubernetes/pkg/kubelet/cm/devicemanager/plugin/v1beta1"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager/bitmask"
 	"k8s.io/kubernetes/pkg/kubelet/config"
@@ -50,6 +52,30 @@ import (
 const (
 	testResourceName = "fake-domain/resource"
 )
+
+func newWrappedManagerImpl(socketPath string, manager *ManagerImpl) *wrappedManagerImpl {
+	w := &wrappedManagerImpl{
+		ManagerImpl: manager,
+		callback:    manager.genericDeviceUpdateCallback,
+	}
+	w.socketdir, _ = filepath.Split(socketPath)
+	w.server, _ = plugin.NewServer(socketPath, w, w)
+	return w
+}
+
+type wrappedManagerImpl struct {
+	*ManagerImpl
+	socketdir string
+	callback  func(string, []pluginapi.Device)
+}
+
+func (m *wrappedManagerImpl) PluginListAndWatchReceiver(r string, resp *pluginapi.ListAndWatchResponse) {
+	var devices []pluginapi.Device
+	for _, d := range resp.Devices {
+		devices = append(devices, *d)
+	}
+	m.callback(r, devices)
+}
 
 func tmpSocketDir() (socketDir, socketName, pluginSocketName string, err error) {
 	socketDir, err = ioutil.TempDir("", "device_plugin")
@@ -120,7 +146,7 @@ func TestDevicePluginReRegistration(t *testing.T) {
 			require.Equal(t, resourceCapacity.Value(), resourceAllocatable.Value(), "capacity should equal to allocatable")
 			require.Equal(t, int64(2), resourceAllocatable.Value(), "Devices are not updated.")
 
-			p2 := NewDevicePluginStub(devs, pluginSocketName+".new", testResourceName, preStartContainerFlag, getPreferredAllocationFlag)
+			p2 := plugin.NewDevicePluginStub(devs, pluginSocketName+".new", testResourceName, preStartContainerFlag, getPreferredAllocationFlag)
 			err = p2.Start()
 			require.NoError(t, err)
 			p2.Register(socketName, testResourceName, "")
@@ -137,7 +163,7 @@ func TestDevicePluginReRegistration(t *testing.T) {
 			require.Equal(t, int64(2), resourceAllocatable.Value(), "Devices shouldn't change.")
 
 			// Test the scenario that a plugin re-registers with different devices.
-			p3 := NewDevicePluginStub(devsForRegistration, pluginSocketName+".third", testResourceName, preStartContainerFlag, getPreferredAllocationFlag)
+			p3 := plugin.NewDevicePluginStub(devsForRegistration, pluginSocketName+".third", testResourceName, preStartContainerFlag, getPreferredAllocationFlag)
 			err = p3.Start()
 			require.NoError(t, err)
 			p3.Register(socketName, testResourceName, "")
@@ -190,7 +216,7 @@ func TestDevicePluginReRegistrationProbeMode(t *testing.T) {
 	require.Equal(t, resourceCapacity.Value(), resourceAllocatable.Value(), "capacity should equal to allocatable")
 	require.Equal(t, int64(2), resourceAllocatable.Value(), "Devices are not updated.")
 
-	p2 := NewDevicePluginStub(devs, pluginSocketName+".new", testResourceName, false, false)
+	p2 := plugin.NewDevicePluginStub(devs, pluginSocketName+".new", testResourceName, false, false)
 	err = p2.Start()
 	require.NoError(t, err)
 	// Wait for the second callback to be issued.
@@ -207,7 +233,7 @@ func TestDevicePluginReRegistrationProbeMode(t *testing.T) {
 	require.Equal(t, int64(2), resourceAllocatable.Value(), "Devices are not updated.")
 
 	// Test the scenario that a plugin re-registers with different devices.
-	p3 := NewDevicePluginStub(devsForRegistration, pluginSocketName+".third", testResourceName, false, false)
+	p3 := plugin.NewDevicePluginStub(devsForRegistration, pluginSocketName+".third", testResourceName, false, false)
 	err = p3.Start()
 	require.NoError(t, err)
 	// Wait for the third callback to be issued.
@@ -233,12 +259,13 @@ func setupDeviceManager(t *testing.T, devs []*pluginapi.Device, callback monitor
 	require.NoError(t, err)
 	updateChan := make(chan interface{})
 
+	w := newWrappedManagerImpl(socketName, m)
 	if callback != nil {
-		m.callback = callback
+		w.callback = callback
 	}
 
-	originalCallback := m.callback
-	m.callback = func(resourceName string, devices []pluginapi.Device) {
+	originalCallback := w.callback
+	w.callback = func(resourceName string, devices []pluginapi.Device) {
 		originalCallback(resourceName, devices)
 		updateChan <- new(interface{})
 	}
@@ -246,14 +273,14 @@ func setupDeviceManager(t *testing.T, devs []*pluginapi.Device, callback monitor
 		return []*v1.Pod{}
 	}
 
-	err = m.Start(activePods, &sourcesReadyStub{})
+	err = w.Start(activePods, &sourcesReadyStub{})
 	require.NoError(t, err)
 
-	return m, updateChan
+	return w, updateChan
 }
 
-func setupDevicePlugin(t *testing.T, devs []*pluginapi.Device, pluginSocketName string) *Stub {
-	p := NewDevicePluginStub(devs, pluginSocketName, testResourceName, false, false)
+func setupDevicePlugin(t *testing.T, devs []*pluginapi.Device, pluginSocketName string) *plugin.Stub {
+	p := plugin.NewDevicePluginStub(devs, pluginSocketName, testResourceName, false, false)
 	err := p.Start()
 	require.NoError(t, err)
 	return p
@@ -275,20 +302,20 @@ func runPluginManager(pluginManager pluginmanager.PluginManager) {
 	go pluginManager.Run(sourcesReady, wait.NeverStop)
 }
 
-func setup(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, socketName string, pluginSocketName string) (Manager, <-chan interface{}, *Stub) {
+func setup(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, socketName string, pluginSocketName string) (Manager, <-chan interface{}, *plugin.Stub) {
 	m, updateChan := setupDeviceManager(t, devs, callback, socketName)
 	p := setupDevicePlugin(t, devs, pluginSocketName)
 	return m, updateChan, p
 }
 
-func setupInProbeMode(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, socketName string, pluginSocketName string) (Manager, <-chan interface{}, *Stub, pluginmanager.PluginManager) {
+func setupInProbeMode(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, socketName string, pluginSocketName string) (Manager, <-chan interface{}, *plugin.Stub, pluginmanager.PluginManager) {
 	m, updateChan := setupDeviceManager(t, devs, callback, socketName)
 	p := setupDevicePlugin(t, devs, pluginSocketName)
 	pm := setupPluginManager(t, pluginSocketName, m)
 	return m, updateChan, p, pm
 }
 
-func cleanup(t *testing.T, m Manager, p *Stub) {
+func cleanup(t *testing.T, m Manager, p *plugin.Stub) {
 	p.Stop()
 	m.Stop()
 }
@@ -364,6 +391,7 @@ func TestUpdateCapacityAllocatable(t *testing.T) {
 	// Tests adding another resource.
 	resourceName2 := "resource2"
 	e2 := &endpointImpl{}
+	e2.client = plugin.NewPluginClient(resourceName2, socketName, testManager)
 	testManager.endpoints[resourceName2] = endpointInfo{e: e2, opts: nil}
 	callback(resourceName2, devs)
 	capacity, allocatable, removedResources = testManager.GetCapacity()
@@ -393,7 +421,7 @@ func TestUpdateCapacityAllocatable(t *testing.T) {
 
 	// Stops resourceName2 endpoint. Verifies its stopTime is set, allocate and
 	// preStartContainer calls return errors.
-	e2.stop()
+	e2.client.Disconnect()
 	as.False(e2.stopTime.IsZero())
 	_, err = e2.allocate([]string{"Device1"})
 	reflect.DeepEqual(err, fmt.Errorf(errEndpointStopped, e2))
@@ -434,6 +462,100 @@ func TestUpdateCapacityAllocatable(t *testing.T) {
 	as.True(testManager.isDevicePluginResource(resourceName2))
 }
 
+func TestGetAllocatableDevicesMultipleResources(t *testing.T) {
+	socketDir, socketName, _, err := tmpSocketDir()
+	topologyStore := topologymanager.NewFakeManager()
+	require.NoError(t, err)
+	defer os.RemoveAll(socketDir)
+	testManager, err := newManagerImpl(socketName, nil, topologyStore)
+	as := assert.New(t)
+	as.NotNil(testManager)
+	as.Nil(err)
+
+	resource1Devs := []pluginapi.Device{
+		{ID: "R1Device1", Health: pluginapi.Healthy},
+		{ID: "R1Device2", Health: pluginapi.Healthy},
+		{ID: "R1Device3", Health: pluginapi.Unhealthy},
+	}
+	resourceName1 := "domain1.com/resource1"
+	e1 := &endpointImpl{}
+	testManager.endpoints[resourceName1] = endpointInfo{e: e1, opts: nil}
+	testManager.genericDeviceUpdateCallback(resourceName1, resource1Devs)
+
+	resource2Devs := []pluginapi.Device{
+		{ID: "R2Device1", Health: pluginapi.Healthy},
+	}
+	resourceName2 := "other.domain2.org/resource2"
+	e2 := &endpointImpl{}
+	testManager.endpoints[resourceName2] = endpointInfo{e: e2, opts: nil}
+	testManager.genericDeviceUpdateCallback(resourceName2, resource2Devs)
+
+	allocatableDevs := testManager.GetAllocatableDevices()
+	as.Equal(2, len(allocatableDevs))
+
+	devInstances1, ok := allocatableDevs[resourceName1]
+	as.True(ok)
+	checkAllocatableDevicesConsistsOf(as, devInstances1, []string{"R1Device1", "R1Device2"})
+
+	devInstances2, ok := allocatableDevs[resourceName2]
+	as.True(ok)
+	checkAllocatableDevicesConsistsOf(as, devInstances2, []string{"R2Device1"})
+
+}
+
+func TestGetAllocatableDevicesHealthTransition(t *testing.T) {
+	socketDir, socketName, _, err := tmpSocketDir()
+	topologyStore := topologymanager.NewFakeManager()
+	require.NoError(t, err)
+	defer os.RemoveAll(socketDir)
+	testManager, err := newManagerImpl(socketName, nil, topologyStore)
+	as := assert.New(t)
+	as.NotNil(testManager)
+	as.Nil(err)
+
+	resource1Devs := []pluginapi.Device{
+		{ID: "R1Device1", Health: pluginapi.Healthy},
+		{ID: "R1Device2", Health: pluginapi.Healthy},
+		{ID: "R1Device3", Health: pluginapi.Unhealthy},
+	}
+
+	// Adds three devices for resource1, two healthy and one unhealthy.
+	// Expects allocatable devices for resource1 to be 2.
+	resourceName1 := "domain1.com/resource1"
+	e1 := &endpointImpl{}
+	testManager.endpoints[resourceName1] = endpointInfo{e: e1, opts: nil}
+
+	testManager.genericDeviceUpdateCallback(resourceName1, resource1Devs)
+
+	allocatableDevs := testManager.GetAllocatableDevices()
+	as.Equal(1, len(allocatableDevs))
+	devInstances, ok := allocatableDevs[resourceName1]
+	as.True(ok)
+	checkAllocatableDevicesConsistsOf(as, devInstances, []string{"R1Device1", "R1Device2"})
+
+	// Unhealthy device becomes healthy
+	resource1Devs = []pluginapi.Device{
+		{ID: "R1Device1", Health: pluginapi.Healthy},
+		{ID: "R1Device2", Health: pluginapi.Healthy},
+		{ID: "R1Device3", Health: pluginapi.Healthy},
+	}
+	testManager.genericDeviceUpdateCallback(resourceName1, resource1Devs)
+
+	allocatableDevs = testManager.GetAllocatableDevices()
+	as.Equal(1, len(allocatableDevs))
+	devInstances, ok = allocatableDevs[resourceName1]
+	as.True(ok)
+	checkAllocatableDevicesConsistsOf(as, devInstances, []string{"R1Device1", "R1Device2", "R1Device3"})
+}
+
+func checkAllocatableDevicesConsistsOf(as *assert.Assertions, devInstances DeviceInstances, expectedDevs []string) {
+	as.Equal(len(expectedDevs), len(devInstances))
+	for _, deviceID := range expectedDevs {
+		_, ok := devInstances[deviceID]
+		as.True(ok)
+	}
+}
+
 func constructDevices(devices []string) checkpoint.DevicesPerNUMA {
 	ret := checkpoint.DevicesPerNUMA{}
 	for _, dev := range devices {
@@ -468,6 +590,7 @@ func constructAllocResp(devices, mounts, envs map[string]string) *pluginapi.Cont
 func TestCheckpoint(t *testing.T) {
 	resourceName1 := "domain1.com/resource1"
 	resourceName2 := "domain2.com/resource2"
+	resourceName3 := "domain2.com/resource3"
 	as := assert.New(t)
 	tmpDir, err := ioutil.TempDir("", "checkpoint")
 	as.Nil(err)
@@ -500,6 +623,10 @@ func TestCheckpoint(t *testing.T) {
 		constructDevices([]string{"dev4"}),
 		constructAllocResp(map[string]string{"/dev/r1dev4": "/dev/r1dev4"},
 			map[string]string{"/home/r1lib1": "/usr/r1lib1"}, map[string]string{}))
+	testManager.podDevices.insert("pod3", "con3", resourceName3,
+		checkpoint.DevicesPerNUMA{nodeWithoutTopology: []string{"dev5"}},
+		constructAllocResp(map[string]string{"/dev/r1dev5": "/dev/r1dev5"},
+			map[string]string{"/home/r1lib1": "/usr/r1lib1"}, map[string]string{}))
 
 	testManager.healthyDevices[resourceName1] = sets.NewString()
 	testManager.healthyDevices[resourceName1].Insert("dev1")
@@ -510,6 +637,8 @@ func TestCheckpoint(t *testing.T) {
 	testManager.healthyDevices[resourceName2] = sets.NewString()
 	testManager.healthyDevices[resourceName2].Insert("dev1")
 	testManager.healthyDevices[resourceName2].Insert("dev2")
+	testManager.healthyDevices[resourceName3] = sets.NewString()
+	testManager.healthyDevices[resourceName3].Insert("dev5")
 
 	expectedPodDevices := testManager.podDevices
 	expectedAllocatedDevices := testManager.podDevices.devices()
@@ -559,11 +688,6 @@ type MockEndpoint struct {
 	initChan                   chan []string
 }
 
-func (m *MockEndpoint) stop() {}
-func (m *MockEndpoint) run()  {}
-
-func (m *MockEndpoint) callback(resourceName string, devices []pluginapi.Device) {}
-
 func (m *MockEndpoint) preStartContainer(devs []string) (*pluginapi.PreStartContainerResponse, error) {
 	m.initChan <- devs
 	return &pluginapi.PreStartContainerResponse{}, nil
@@ -582,6 +706,8 @@ func (m *MockEndpoint) allocate(devs []string) (*pluginapi.AllocateResponse, err
 	}
 	return nil, nil
 }
+
+func (m *MockEndpoint) setStopTime(t time.Time) {}
 
 func (m *MockEndpoint) isStopped() bool { return false }
 
@@ -604,15 +730,13 @@ func makePod(limits v1.ResourceList) *v1.Pod {
 	}
 }
 
-func getTestManager(tmpDir string, activePods ActivePodsFunc, testRes []TestResource) (*ManagerImpl, error) {
+func getTestManager(tmpDir string, activePods ActivePodsFunc, testRes []TestResource) (*wrappedManagerImpl, error) {
 	monitorCallback := func(resourceName string, devices []pluginapi.Device) {}
 	ckm, err := checkpointmanager.NewCheckpointManager(tmpDir)
 	if err != nil {
 		return nil, err
 	}
-	testManager := &ManagerImpl{
-		socketdir:             tmpDir,
-		callback:              monitorCallback,
+	m := &ManagerImpl{
 		healthyDevices:        make(map[string]sets.String),
 		unhealthyDevices:      make(map[string]sets.String),
 		allocatedDevices:      make(map[string]sets.String),
@@ -624,6 +748,11 @@ func getTestManager(tmpDir string, activePods ActivePodsFunc, testRes []TestReso
 		sourcesReady:          &sourcesReadyStub{},
 		checkpointManager:     ckm,
 		allDevices:            NewResourceDeviceInstances(),
+	}
+	testManager := &wrappedManagerImpl{
+		ManagerImpl: m,
+		socketdir:   tmpDir,
+		callback:    monitorCallback,
 	}
 
 	for _, res := range testRes {
@@ -716,6 +845,9 @@ func TestFilterByAffinity(t *testing.T) {
 						},
 					},
 				},
+			},
+			"devwithouttopology": {
+				ID: "dev5",
 			},
 		},
 	}
@@ -854,6 +986,69 @@ func TestPodContainerDeviceAllocation(t *testing.T) {
 
 }
 
+func TestGetDeviceRunContainerOptions(t *testing.T) {
+	res1 := TestResource{
+		resourceName:     "domain1.com/resource1",
+		resourceQuantity: *resource.NewQuantity(int64(2), resource.DecimalSI),
+		devs:             checkpoint.DevicesPerNUMA{0: []string{"dev1", "dev2"}},
+		topology:         true,
+	}
+	res2 := TestResource{
+		resourceName:     "domain2.com/resource2",
+		resourceQuantity: *resource.NewQuantity(int64(1), resource.DecimalSI),
+		devs:             checkpoint.DevicesPerNUMA{0: []string{"dev3", "dev4"}},
+		topology:         false,
+	}
+
+	testResources := make([]TestResource, 2)
+	testResources = append(testResources, res1)
+	testResources = append(testResources, res2)
+
+	podsStub := activePodsStub{
+		activePods: []*v1.Pod{},
+	}
+	as := require.New(t)
+
+	tmpDir, err := ioutil.TempDir("", "checkpoint")
+	as.Nil(err)
+	defer os.RemoveAll(tmpDir)
+
+	testManager, err := getTestManager(tmpDir, podsStub.getActivePods, testResources)
+	as.Nil(err)
+
+	pod1 := makePod(v1.ResourceList{
+		v1.ResourceName(res1.resourceName): res1.resourceQuantity,
+		v1.ResourceName(res2.resourceName): res2.resourceQuantity,
+	})
+	pod2 := makePod(v1.ResourceList{
+		v1.ResourceName(res2.resourceName): res2.resourceQuantity,
+	})
+
+	activePods := []*v1.Pod{pod1, pod2}
+	podsStub.updateActivePods(activePods)
+
+	err = testManager.Allocate(pod1, &pod1.Spec.Containers[0])
+	as.Nil(err)
+	err = testManager.Allocate(pod2, &pod2.Spec.Containers[0])
+	as.Nil(err)
+
+	// when pod is in activePods, GetDeviceRunContainerOptions should return
+	runContainerOpts, err := testManager.GetDeviceRunContainerOptions(pod1, &pod1.Spec.Containers[0])
+	as.Nil(err)
+	as.Equal(len(runContainerOpts.Devices), 3)
+	as.Equal(len(runContainerOpts.Mounts), 2)
+	as.Equal(len(runContainerOpts.Envs), 2)
+
+	activePods = []*v1.Pod{pod2}
+	podsStub.updateActivePods(activePods)
+	testManager.UpdateAllocatedDevices()
+
+	// when pod is removed from activePods,G etDeviceRunContainerOptions should return error
+	runContainerOpts, err = testManager.GetDeviceRunContainerOptions(pod1, &pod1.Spec.Containers[0])
+	as.Nil(err)
+	as.Nil(runContainerOpts)
+}
+
 func TestInitContainerDeviceAllocation(t *testing.T) {
 	// Requesting to create a pod that requests resourceName1 in init containers and normal containers
 	// should succeed with devices allocated to init containers reallocated to normal containers.
@@ -973,12 +1168,15 @@ func TestUpdatePluginResources(t *testing.T) {
 
 	ckm, err := checkpointmanager.NewCheckpointManager(tmpDir)
 	as.Nil(err)
-	testManager := &ManagerImpl{
-		callback:          monitorCallback,
+	m := &ManagerImpl{
 		allocatedDevices:  make(map[string]sets.String),
 		healthyDevices:    make(map[string]sets.String),
 		podDevices:        newPodDevices(),
 		checkpointManager: ckm,
+	}
+	testManager := wrappedManagerImpl{
+		ManagerImpl: m,
+		callback:    monitorCallback,
 	}
 	testManager.podDevices.devs[string(pod.UID)] = make(containerDevices)
 
@@ -1183,4 +1381,26 @@ func makeDevice(devOnNUMA checkpoint.DevicesPerNUMA, topology bool) map[string]p
 		}
 	}
 	return res
+}
+
+const deviceManagerCheckpointFilename = "kubelet_internal_checkpoint"
+
+var oldCheckpoint string = `{"Data":{"PodDeviceEntries":[{"PodUID":"13ac2284-0d19-44b7-b94f-055b032dba9b","ContainerName":"centos","ResourceName":"example.com/deviceA","DeviceIDs":["DevA3"],"AllocResp":"CiIKHUVYQU1QTEVDT01ERVZJQ0VBX0RFVkEzX1RUWTEwEgEwGhwKCi9kZXYvdHR5MTASCi9kZXYvdHR5MTAaAnJ3"},{"PodUID":"86b9a017-c9ca-4069-815f-46ca3e53c1e4","ContainerName":"centos","ResourceName":"example.com/deviceA","DeviceIDs":["DevA4"],"AllocResp":"CiIKHUVYQU1QTEVDT01ERVZJQ0VBX0RFVkE0X1RUWTExEgEwGhwKCi9kZXYvdHR5MTESCi9kZXYvdHR5MTEaAnJ3"}],"RegisteredDevices":{"example.com/deviceA":["DevA1","DevA2","DevA3","DevA4"]}},"Checksum":405612085}`
+
+func TestReadPreNUMACheckpoint(t *testing.T) {
+	socketDir, socketName, _, err := tmpSocketDir()
+	require.NoError(t, err)
+	defer os.RemoveAll(socketDir)
+
+	err = ioutil.WriteFile(filepath.Join(socketDir, deviceManagerCheckpointFilename), []byte(oldCheckpoint), 0644)
+	require.NoError(t, err)
+
+	topologyStore := topologymanager.NewFakeManager()
+	nodes := []cadvisorapi.Node{{Id: 0}}
+	m, err := newManagerImpl(socketName, nodes, topologyStore)
+	require.NoError(t, err)
+
+	// TODO: we should not calling private methods, but among the existing tests we do anyway
+	err = m.readCheckpoint()
+	require.NoError(t, err)
 }

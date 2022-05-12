@@ -146,6 +146,15 @@ func dcSimpleSetup(t *testing.T) (*httptest.Server, framework.CloseFunc, clients
 	return s, closeFn, clientSet
 }
 
+// runControllersAndInformers runs RS and deployment controllers and informers
+func runControllersAndInformers(t *testing.T, rm *replicaset.ReplicaSetController, dc *deployment.DeploymentController, informers informers.SharedInformerFactory) func() {
+	ctx, cancelFn := context.WithCancel(context.Background())
+	informers.Start(ctx.Done())
+	go rm.Run(ctx, 5)
+	go dc.Run(ctx, 5)
+	return cancelFn
+}
+
 // addPodConditionReady sets given pod status to ready at given time
 func addPodConditionReady(pod *v1.Pod, time metav1.Time) {
 	pod.Status = v1.PodStatus{
@@ -293,7 +302,7 @@ func (d *deploymentTester) getNewReplicaSet() (*apps.ReplicaSet, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed retrieving deployment %s: %v", d.deployment.Name, err)
 	}
-	rs, err := deploymentutil.GetNewReplicaSet(deployment, d.c.AppsV1())
+	rs, err := testutil.GetNewReplicaSet(deployment, d.c)
 	if err != nil {
 		return nil, fmt.Errorf("failed retrieving new replicaset of deployment %s: %v", d.deployment.Name, err)
 	}

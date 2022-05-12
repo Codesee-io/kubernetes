@@ -561,39 +561,87 @@ func TestServiceDefaultOnRead(t *testing.T) {
 		input  runtime.Object
 		expect runtime.Object
 	}{{
-		name:   "no change v4",
-		input:  svctest.MakeService("foo", svctest.SetClusterIPs("10.0.0.1")),
-		expect: svctest.MakeService("foo", svctest.SetClusterIPs("10.0.0.1")),
+		name:  "single v4",
+		input: svctest.MakeService("foo", svctest.SetClusterIPs("10.0.0.1")),
+		expect: svctest.MakeService("foo", svctest.SetClusterIPs("10.0.0.1"),
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
+			svctest.SetIPFamilies(api.IPv4Protocol)),
 	}, {
-		name:   "missing clusterIPs v4",
-		input:  svctest.MakeService("foo", svctest.SetClusterIP("10.0.0.1")),
-		expect: svctest.MakeService("foo", svctest.SetClusterIPs("10.0.0.1")),
+		name:  "single v6",
+		input: svctest.MakeService("foo", svctest.SetClusterIPs("2000::1")),
+		expect: svctest.MakeService("foo", svctest.SetClusterIPs("2000::1"),
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
+			svctest.SetIPFamilies(api.IPv6Protocol)),
 	}, {
-		name:   "no change v6",
-		input:  svctest.MakeService("foo", svctest.SetClusterIPs("2000::1")),
-		expect: svctest.MakeService("foo", svctest.SetClusterIPs("2000::1")),
+		name:  "missing clusterIPs v4",
+		input: svctest.MakeService("foo", svctest.SetClusterIP("10.0.0.1")),
+		expect: svctest.MakeService("foo", svctest.SetClusterIPs("10.0.0.1"),
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
+			svctest.SetIPFamilies(api.IPv4Protocol)),
 	}, {
-		name:   "missing clusterIPs v6",
-		input:  svctest.MakeService("foo", svctest.SetClusterIP("2000::1")),
-		expect: svctest.MakeService("foo", svctest.SetClusterIPs("2000::1")),
+		name:  "missing clusterIPs v6",
+		input: svctest.MakeService("foo", svctest.SetClusterIP("2000::1")),
+		expect: svctest.MakeService("foo", svctest.SetClusterIPs("2000::1"),
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
+			svctest.SetIPFamilies(api.IPv6Protocol)),
 	}, {
-		name:   "list, no change v4",
-		input:  makeServiceList(svctest.SetClusterIPs("10.0.0.1")),
-		expect: makeServiceList(svctest.SetClusterIPs("10.0.0.1")),
+		name:  "list v4",
+		input: makeServiceList(svctest.SetClusterIPs("10.0.0.1")),
+		expect: makeServiceList(svctest.SetClusterIPs("10.0.0.1"),
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
+			svctest.SetIPFamilies(api.IPv4Protocol)),
 	}, {
-		name:   "list, missing clusterIPs v4",
-		input:  makeServiceList(svctest.SetClusterIP("10.0.0.1")),
-		expect: makeServiceList(svctest.SetClusterIPs("10.0.0.1")),
+		name:  "list missing clusterIPs v4",
+		input: makeServiceList(svctest.SetClusterIP("10.0.0.1")),
+		expect: makeServiceList(svctest.SetClusterIPs("10.0.0.1"),
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
+			svctest.SetIPFamilies(api.IPv4Protocol)),
+	}, {
+		name:   "external name",
+		input:  makeServiceList(svctest.SetTypeExternalName, svctest.SetInternalTrafficPolicy(api.ServiceInternalTrafficPolicyCluster)),
+		expect: makeServiceList(svctest.SetTypeExternalName),
+	}, {
+		name:  "dual v4v6",
+		input: svctest.MakeService("foo", svctest.SetClusterIPs("10.0.0.1", "2000::1")),
+		expect: svctest.MakeService("foo", svctest.SetClusterIPs("10.0.0.1", "2000::1"),
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack),
+			svctest.SetIPFamilies(api.IPv4Protocol, api.IPv6Protocol)),
+	}, {
+		name:  "dual v6v4",
+		input: svctest.MakeService("foo", svctest.SetClusterIPs("2000::1", "10.0.0.1")),
+		expect: svctest.MakeService("foo", svctest.SetClusterIPs("2000::1", "10.0.0.1"),
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack),
+			svctest.SetIPFamilies(api.IPv6Protocol, api.IPv4Protocol)),
+	}, {
+		name:  "headless",
+		input: svctest.MakeService("foo", svctest.SetHeadless),
+		expect: svctest.MakeService("foo", svctest.SetHeadless,
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
+			svctest.SetIPFamilies(api.IPv4Protocol)),
+	}, {
+		name: "headless selectorless",
+		input: svctest.MakeService("foo", svctest.SetHeadless,
+			svctest.SetSelector(map[string]string{})),
+		expect: svctest.MakeService("foo", svctest.SetHeadless,
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack),
+			svctest.SetIPFamilies(api.IPv4Protocol, api.IPv6Protocol)),
+	}, {
+		name: "headless selectorless pre-set",
+		input: svctest.MakeService("foo", svctest.SetHeadless,
+			svctest.SetSelector(map[string]string{}),
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
+			svctest.SetIPFamilies(api.IPv6Protocol)),
+		expect: svctest.MakeService("foo", svctest.SetHeadless,
+			svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
+			svctest.SetIPFamilies(api.IPv6Protocol)),
 	}, {
 		name:  "not Service or ServiceList",
 		input: &api.Pod{},
 	}}
 
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, true)()
-
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			storage, _, server := newStorage(t, []api.IPFamily{api.IPv4Protocol})
+			storage, _, server := newStorage(t, []api.IPFamily{api.IPv4Protocol, api.IPv6Protocol})
 			defer server.Terminate(t)
 			defer storage.Store.DestroyFunc()
 
@@ -619,11 +667,20 @@ func TestServiceDefaultOnRead(t *testing.T) {
 			}
 
 			// Verify fields we know are affected
-			if svc.Spec.ClusterIP != exp.Spec.ClusterIP {
-				t.Errorf("clusterIP: expected %v, got %v", exp.Spec.ClusterIP, svc.Spec.ClusterIP)
+			if want, got := exp.Spec.ClusterIP, svc.Spec.ClusterIP; want != got {
+				t.Errorf("clusterIP: expected %v, got %v", want, got)
 			}
-			if !reflect.DeepEqual(svc.Spec.ClusterIPs, exp.Spec.ClusterIPs) {
-				t.Errorf("clusterIPs: expected %v, got %v", exp.Spec.ClusterIPs, svc.Spec.ClusterIPs)
+			if want, got := exp.Spec.ClusterIPs, svc.Spec.ClusterIPs; !reflect.DeepEqual(want, got) {
+				t.Errorf("clusterIPs: expected %v, got %v", want, got)
+			}
+			if want, got := fmtIPFamilyPolicy(exp.Spec.IPFamilyPolicy), fmtIPFamilyPolicy(svc.Spec.IPFamilyPolicy); want != got {
+				t.Errorf("ipFamilyPolicy: expected %v, got %v", want, got)
+			}
+			if want, got := exp.Spec.IPFamilies, svc.Spec.IPFamilies; !reflect.DeepEqual(want, got) {
+				t.Errorf("ipFamilies: expected %v, got %v", want, got)
+			}
+			if want, got := fmtInternalTrafficPolicy(exp.Spec.InternalTrafficPolicy), fmtInternalTrafficPolicy(svc.Spec.InternalTrafficPolicy); want != got {
+				t.Errorf("internalTrafficPolicy: expected %v, got %v", want, got)
 			}
 		})
 	}
@@ -670,9 +727,6 @@ func helpTestCreateUpdateDelete(t *testing.T, testCases []cudTestCase) {
 func helpTestCreateUpdateDeleteWithFamilies(t *testing.T, testCases []cudTestCase, ipFamilies []api.IPFamily) {
 	// NOTE: do not call t.Helper() here.  It's more useful for errors to be
 	// attributed to lines in this function than the caller of it.
-
-	// This test is ONLY with the gate enabled.
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, true)()
 
 	storage, _, server := newStorage(t, ipFamilies)
 	defer server.Terminate(t)
@@ -772,9 +826,7 @@ type fakeTestingT struct {
 
 func (f fakeTestingT) Helper() {}
 
-func (f fakeTestingT) Errorf(format string, args ...interface{}) {
-	f.t.Logf(format, args...)
-}
+func (f fakeTestingT) Errorf(format string, args ...interface{}) {}
 
 func verifyEquiv(t testingTInterface, call string, tc *svcTestCase, got *api.Service) bool {
 	t.Helper()
@@ -794,20 +846,18 @@ func verifyEquiv(t testingTInterface, call string, tc *svcTestCase, got *api.Ser
 		if want.Spec.ClusterIP == "" {
 			want.Spec.ClusterIP = got.Spec.ClusterIP
 		}
-		if utilfeature.DefaultFeatureGate.Enabled(features.IPv6DualStack) {
-			if want.Spec.IPFamilyPolicy == nil {
-				want.Spec.IPFamilyPolicy = got.Spec.IPFamilyPolicy
-			}
-			if tc.expectStackDowngrade && len(want.Spec.ClusterIPs) > len(got.Spec.ClusterIPs) {
-				want.Spec.ClusterIPs = want.Spec.ClusterIPs[0:1]
-			} else if len(got.Spec.ClusterIPs) > len(want.Spec.ClusterIPs) {
-				want.Spec.ClusterIPs = append(want.Spec.ClusterIPs, got.Spec.ClusterIPs[len(want.Spec.ClusterIPs):]...)
-			}
-			if tc.expectStackDowngrade && len(want.Spec.IPFamilies) > len(got.Spec.ClusterIPs) {
-				want.Spec.IPFamilies = want.Spec.IPFamilies[0:1]
-			} else if len(got.Spec.IPFamilies) > len(want.Spec.IPFamilies) {
-				want.Spec.IPFamilies = append(want.Spec.IPFamilies, got.Spec.IPFamilies[len(want.Spec.IPFamilies):]...)
-			}
+		if want.Spec.IPFamilyPolicy == nil {
+			want.Spec.IPFamilyPolicy = got.Spec.IPFamilyPolicy
+		}
+		if tc.expectStackDowngrade && len(want.Spec.ClusterIPs) > len(got.Spec.ClusterIPs) {
+			want.Spec.ClusterIPs = want.Spec.ClusterIPs[0:1]
+		} else if len(got.Spec.ClusterIPs) > len(want.Spec.ClusterIPs) {
+			want.Spec.ClusterIPs = append(want.Spec.ClusterIPs, got.Spec.ClusterIPs[len(want.Spec.ClusterIPs):]...)
+		}
+		if tc.expectStackDowngrade && len(want.Spec.IPFamilies) > len(got.Spec.ClusterIPs) {
+			want.Spec.IPFamilies = want.Spec.IPFamilies[0:1]
+		} else if len(got.Spec.IPFamilies) > len(want.Spec.IPFamilies) {
+			want.Spec.IPFamilies = append(want.Spec.IPFamilies, got.Spec.IPFamilies[len(want.Spec.IPFamilies):]...)
 		}
 	}
 
@@ -965,8 +1015,6 @@ func TestVerifyEquiv(t *testing.T) {
 		expect: false,
 	}}
 
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, true)()
-
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			result := verifyEquiv(fakeTestingT{t}, "test", &tc.input, tc.output)
@@ -1042,22 +1090,14 @@ func proveClusterIPsAllocated(t *testing.T, storage *wrapperRESTForTests, before
 		t.Errorf("%s: expected clusterIP == clusterIPs[0]: %q != %q", callName(before, after), sing, plur)
 	}
 
-	clips := []string{}
-	if utilfeature.DefaultFeatureGate.Enabled(features.IPv6DualStack) {
-		clips = after.Spec.ClusterIPs
-	} else {
-		clips = append(clips, after.Spec.ClusterIP)
-	}
-	for _, clip := range clips {
+	for _, clip := range after.Spec.ClusterIPs {
 		if !ipIsAllocated(t, storage.alloc.serviceIPAllocatorsByFamily[familyOf(clip)], clip) {
 			t.Errorf("%s: expected clusterIP to be allocated: %q", callName(before, after), clip)
 		}
 	}
 
-	if utilfeature.DefaultFeatureGate.Enabled(features.IPv6DualStack) {
-		if lc, lf := len(after.Spec.ClusterIPs), len(after.Spec.IPFamilies); lc != lf {
-			t.Errorf("%s: expected same number of clusterIPs and ipFamilies: %d != %d", callName(before, after), lc, lf)
-		}
+	if lc, lf := len(after.Spec.ClusterIPs), len(after.Spec.IPFamilies); lc != lf {
+		t.Errorf("%s: expected same number of clusterIPs and ipFamilies: %d != %d", callName(before, after), lc, lf)
 	}
 
 	for i, fam := range after.Spec.IPFamilies {
@@ -1066,23 +1106,21 @@ func proveClusterIPsAllocated(t *testing.T, storage *wrapperRESTForTests, before
 		}
 	}
 
-	if utilfeature.DefaultFeatureGate.Enabled(features.IPv6DualStack) {
-		if after.Spec.IPFamilyPolicy == nil {
-			t.Errorf("%s: expected ipFamilyPolicy to be set", callName(before, after))
-		} else {
-			pol := *after.Spec.IPFamilyPolicy
-			fams := len(after.Spec.IPFamilies)
-			clus := 1
-			if storage.secondaryIPFamily != "" {
-				clus = 2
-			}
-			if pol == api.IPFamilyPolicySingleStack && fams != 1 {
-				t.Errorf("%s: expected 1 ipFamily, got %d", callName(before, after), fams)
-			} else if pol == api.IPFamilyPolicyRequireDualStack && fams != 2 {
-				t.Errorf("%s: expected 2 ipFamilies, got %d", callName(before, after), fams)
-			} else if pol == api.IPFamilyPolicyPreferDualStack && fams != clus {
-				t.Errorf("%s: expected %d ipFamilies, got %d", callName(before, after), clus, fams)
-			}
+	if after.Spec.IPFamilyPolicy == nil {
+		t.Errorf("%s: expected ipFamilyPolicy to be set", callName(before, after))
+	} else {
+		pol := *after.Spec.IPFamilyPolicy
+		fams := len(after.Spec.IPFamilies)
+		clus := 1
+		if storage.secondaryIPFamily != "" {
+			clus = 2
+		}
+		if pol == api.IPFamilyPolicySingleStack && fams != 1 {
+			t.Errorf("%s: expected 1 ipFamily, got %d", callName(before, after), fams)
+		} else if pol == api.IPFamilyPolicyRequireDualStack && fams != 2 {
+			t.Errorf("%s: expected 2 ipFamilies, got %d", callName(before, after), fams)
+		} else if pol == api.IPFamilyPolicyPreferDualStack && fams != clus {
+			t.Errorf("%s: expected %d ipFamilies, got %d", callName(before, after), clus, fams)
 		}
 	}
 
@@ -1124,13 +1162,7 @@ func proveClusterIPsDeallocated(t *testing.T, storage *wrapperRESTForTests, befo
 	}
 
 	if before != nil && before.Spec.ClusterIP != api.ClusterIPNone {
-		clips := []string{}
-		if utilfeature.DefaultFeatureGate.Enabled(features.IPv6DualStack) {
-			clips = before.Spec.ClusterIPs
-		} else {
-			clips = append(clips, before.Spec.ClusterIP)
-		}
-		for _, clip := range clips {
+		for _, clip := range before.Spec.ClusterIPs {
 			if ipIsAllocated(t, storage.alloc.serviceIPAllocatorsByFamily[familyOf(clip)], clip) {
 				t.Errorf("%s: expected clusterIP to be deallocated: %q", callName(before, after), clip)
 			}
@@ -1214,6 +1246,13 @@ func fmtIPFamilyPolicy(pol *api.IPFamilyPolicyType) string {
 	return string(*pol)
 }
 
+func fmtInternalTrafficPolicy(pol *api.ServiceInternalTrafficPolicyType) string {
+	if pol == nil {
+		return "<nil>"
+	}
+	return string(*pol)
+}
+
 func fmtIPFamilies(fams []api.IPFamily) string {
 	if fams == nil {
 		return "[]"
@@ -1233,35 +1272,10 @@ func TestCreateIgnoresIPsForExternalName(t *testing.T) {
 	testCases := []struct {
 		name            string
 		clusterFamilies []api.IPFamily
-		enableDualStack bool
 		cases           []testCase
 	}{{
-		name:            "singlestack:v4_gate:off",
-		clusterFamilies: []api.IPFamily{api.IPv4Protocol},
-		enableDualStack: false,
-		cases: []testCase{{
-			name: "Policy:unset_Families:unset",
-			svc:  svctest.MakeService("foo"),
-		}, {
-			name: "Policy:SingleStack_Families:v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
-				svctest.SetIPFamilies(api.IPv4Protocol)),
-		}, {
-			name: "Policy:PreferDualStack_Families:v4v6",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyPreferDualStack),
-				svctest.SetIPFamilies(api.IPv4Protocol, api.IPv6Protocol)),
-		}, {
-			name: "Policy:RequireDualStack_Families:v6v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack),
-				svctest.SetIPFamilies(api.IPv6Protocol, api.IPv4Protocol)),
-		}},
-	}, {
-		name:            "singlestack:v6_gate:on",
+		name:            "singlestack:v6",
 		clusterFamilies: []api.IPFamily{api.IPv6Protocol},
-		enableDualStack: true,
 		cases: []testCase{{
 			name: "Policy:unset_Families:unset",
 			svc:  svctest.MakeService("foo"),
@@ -1285,32 +1299,8 @@ func TestCreateIgnoresIPsForExternalName(t *testing.T) {
 			expectError: true,
 		}},
 	}, {
-		name:            "dualstack:v4v6_gate:off",
-		clusterFamilies: []api.IPFamily{api.IPv4Protocol, api.IPv6Protocol},
-		enableDualStack: false,
-		cases: []testCase{{
-			name: "Policy:unset_Families:unset",
-			svc:  svctest.MakeService("foo"),
-		}, {
-			name: "Policy:SingleStack_Families:v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
-				svctest.SetIPFamilies(api.IPv4Protocol)),
-		}, {
-			name: "Policy:PreferDualStack_Families:v4v6",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyPreferDualStack),
-				svctest.SetIPFamilies(api.IPv4Protocol, api.IPv6Protocol)),
-		}, {
-			name: "Policy:RequireDualStack_Families:v6v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack),
-				svctest.SetIPFamilies(api.IPv6Protocol, api.IPv4Protocol)),
-		}},
-	}, {
-		name:            "dualstack:v6v4_gate:on",
+		name:            "dualstack:v6v4",
 		clusterFamilies: []api.IPFamily{api.IPv6Protocol, api.IPv4Protocol},
-		enableDualStack: true,
 		cases: []testCase{{
 			name: "Policy:unset_Families:unset",
 			svc:  svctest.MakeService("foo"),
@@ -1337,8 +1327,6 @@ func TestCreateIgnoresIPsForExternalName(t *testing.T) {
 
 	for _, otc := range testCases {
 		t.Run(otc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, otc.enableDualStack)()
-
 			storage, _, server := newStorage(t, otc.clusterFamilies)
 			defer server.Terminate(t)
 			defer storage.Store.DestroyFunc()
@@ -1376,159 +1364,6 @@ func TestCreateIgnoresIPsForExternalName(t *testing.T) {
 						t.Errorf("expected no clusterIPs, got %q", createdSvc.Spec.ClusterIPs)
 					}
 				})
-			}
-		})
-	}
-}
-
-// Prove that create ignores IPFamily stuff when dual-stack is disabled.
-func TestCreateIgnoresIPFamilyWithoutDualStack(t *testing.T) {
-	// These cases were chosen from the full gamut to ensure all "interesting"
-	// cases are covered.
-	testCases := []struct {
-		name string
-		svc  *api.Service
-	}{
-		//----------------------------------------
-		// ClusterIP:unset
-		//----------------------------------------
-		{
-			name: "ClusterIP:unset_Policy:unset_Families:unset",
-			svc:  svctest.MakeService("foo"),
-		}, {
-			name: "ClusterIP:unset_Policy:unset_Families:v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilies(api.IPv4Protocol)),
-		}, {
-			name: "ClusterIP:unset_Policy:unset_Families:v6v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilies(api.IPv6Protocol, api.IPv4Protocol)),
-		}, {
-			name: "ClusterIP:unset_Policy:SingleStack_Families:unset",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack)),
-		}, {
-			name: "ClusterIP:unset_Policy:SingleStack_Families:v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
-				svctest.SetIPFamilies(api.IPv4Protocol)),
-		}, {
-			name: "ClusterIP:unset_Policy:SingleStack_Families:v6v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicySingleStack),
-				svctest.SetIPFamilies(api.IPv6Protocol, api.IPv4Protocol)),
-		}, {
-			name: "ClusterIP:unset_Policy:PreferDualStack_Families:unset",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyPreferDualStack)),
-		}, {
-			name: "ClusterIP:unset_Policy:PreferDualStack_Families:v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyPreferDualStack),
-				svctest.SetIPFamilies(api.IPv4Protocol)),
-		}, {
-			name: "ClusterIP:unset_Policy:PreferDualStack_Families:v6v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyPreferDualStack),
-				svctest.SetIPFamilies(api.IPv6Protocol, api.IPv4Protocol)),
-		}, {
-			name: "ClusterIP:unset_Policy:RequireDualStack_Families:unset",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack)),
-		}, {
-			name: "ClusterIP:unset_Policy:RequireDualStack_Families:v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack),
-				svctest.SetIPFamilies(api.IPv4Protocol)),
-		}, {
-			name: "ClusterIP:unset_Policy:RequireDualStack_Families:v6v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack),
-				svctest.SetIPFamilies(api.IPv6Protocol, api.IPv4Protocol)),
-		},
-		//----------------------------------------
-		// ClusterIPs:v4v6
-		//----------------------------------------
-		{
-			name: "ClusterIPs:v4v6_Policy:unset_Families:unset",
-			svc: svctest.MakeService("foo",
-				svctest.SetClusterIPs("10.0.0.1", "2000::1")),
-		}, {
-			name: "ClusterIPs:v4v6_Policy:unset_Families:v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetClusterIPs("10.0.0.1", "2000::1"),
-				svctest.SetIPFamilies(api.IPv4Protocol)),
-		}, {
-			name: "ClusterIPs:v4v6_Policy:RequireDualStack_Families:unset",
-			svc: svctest.MakeService("foo",
-				svctest.SetClusterIPs("10.0.0.1", "2000::1"),
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack)),
-		},
-		//----------------------------------------
-		// Headless
-		//----------------------------------------
-		{
-			name: "Headless_Policy:unset_Families:unset",
-			svc: svctest.MakeService("foo",
-				svctest.SetHeadless),
-		}, {
-			name: "Headless_Policy:unset_Families:v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetHeadless,
-				svctest.SetIPFamilies(api.IPv4Protocol)),
-		}, {
-			name: "Headless_Policy:RequireDualStack_Families:unset",
-			svc: svctest.MakeService("foo",
-				svctest.SetHeadless,
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack)),
-		},
-		//----------------------------------------
-		// HeadlessSelectorless
-		//----------------------------------------
-		{
-			name: "HeadlessSelectorless_Policy:unset_Families:unset",
-			svc: svctest.MakeService("foo",
-				svctest.SetHeadless,
-				svctest.SetSelector(nil)),
-		}, {
-			name: "HeadlessSelectorless_Policy:unset_Families:v4",
-			svc: svctest.MakeService("foo",
-				svctest.SetHeadless,
-				svctest.SetSelector(nil),
-				svctest.SetIPFamilies(api.IPv4Protocol)),
-		}, {
-			name: "HeadlessSelectorless_Policy:RequireDualStack_Families:unset",
-			svc: svctest.MakeService("foo",
-				svctest.SetHeadless,
-				svctest.SetSelector(nil),
-				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack)),
-		},
-	}
-
-	// This test is ONLY with the gate off.
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, false)()
-
-	// Do this in the outer scope for performance.
-	storage, _, server := newStorage(t, []api.IPFamily{api.IPv4Protocol})
-	defer server.Terminate(t)
-	defer storage.Store.DestroyFunc()
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := genericapirequest.NewDefaultContext()
-			createdObj, err := storage.Create(ctx, tc.svc, rest.ValidateAllObjectFunc, &metav1.CreateOptions{})
-			if err != nil {
-				t.Fatalf("unexpected error creating service: %v", err)
-			}
-			defer storage.Delete(ctx, tc.svc.Name, rest.ValidateAllObjectFunc, &metav1.DeleteOptions{})
-			createdSvc := createdObj.(*api.Service)
-
-			// The gate is off - these should always be empty.
-			if want, got := fmtIPFamilyPolicy(nil), fmtIPFamilyPolicy(createdSvc.Spec.IPFamilyPolicy); want != got {
-				t.Errorf("wrong IPFamilyPolicy: want %s, got %s", want, got)
-			}
-			if want, got := fmtIPFamilies(nil), fmtIPFamilies(createdSvc.Spec.IPFamilies); want != got {
-				t.Errorf("wrong IPFamilies: want %s, got %s", want, got)
 			}
 		})
 	}
@@ -1578,9 +1413,6 @@ func TestCreateInitClusterIPsFromClusterIP(t *testing.T) {
 		svc: svctest.MakeService("foo",
 			svctest.SetClusterIP("2000::1")),
 	}}
-
-	// This test is ONLY with the gate enabled.
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, true)()
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -6037,9 +5869,6 @@ func TestCreateInitIPFields(t *testing.T) {
 		},
 	}
 
-	// This test is ONLY with the gate enabled.
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, true)()
-
 	for _, otc := range testCases {
 		t.Run(otc.name, func(t *testing.T) {
 
@@ -6194,8 +6023,6 @@ func TestCreateInvalidClusterIPInputs(t *testing.T) {
 		expect: []string{"must be a valid IP"},
 	}}
 
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, true)()
-
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			storage, _, server := newStorage(t, tc.families)
@@ -6234,9 +6061,6 @@ func TestCreateDeleteReuse(t *testing.T) {
 			svctest.SetIPFamilyPolicy(api.IPFamilyPolicyPreferDualStack),
 			svctest.SetIPFamilies(api.IPv4Protocol, api.IPv6Protocol)),
 	}}
-
-	// This test is ONLY with the gate enabled.
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, true)()
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -6289,12 +6113,11 @@ func TestCreateDeleteReuse(t *testing.T) {
 
 func TestCreateInitNodePorts(t *testing.T) {
 	testCases := []struct {
-		name                         string
-		svc                          *api.Service
-		expectError                  bool
-		expectNodePorts              bool
-		gateMixedProtocolLBService   bool
-		gateServiceLBNodePortControl bool
+		name                       string
+		svc                        *api.Service
+		expectError                bool
+		expectNodePorts            bool
+		gateMixedProtocolLBService bool
 	}{{
 		name:            "type:ExternalName",
 		svc:             svctest.MakeService("foo"),
@@ -6385,108 +6208,51 @@ func TestCreateInitNodePorts(t *testing.T) {
 			svctest.SetNodePorts(30093, 30093)),
 		expectError: true,
 	}, {
-		// When the ServiceLBNodePortControl gate is locked, this can be removed.
-		name: "type:LoadBalancer_single_port_unspecified_gateServiceLBNodePortControl:off_alloc:nil",
-		svc: svctest.MakeService("foo",
-			svctest.SetTypeLoadBalancer),
-		gateServiceLBNodePortControl: false,
-		expectNodePorts:              true,
-	}, {
-		// When the ServiceLBNodePortControl gate is locked, this can be removed.
-		name: "type:LoadBalancer_single_port_unspecified_gateServiceLBNodePortControl:off_alloc:false",
+		name: "type:LoadBalancer_single_port_unspecified:on_alloc:false",
 		svc: svctest.MakeService("foo",
 			svctest.SetTypeLoadBalancer,
 			svctest.SetAllocateLoadBalancerNodePorts(false)),
-		gateServiceLBNodePortControl: false,
-		expectNodePorts:              true,
+		expectNodePorts: false,
 	}, {
-		// When the ServiceLBNodePortControl gate is locked, this can be removed.
-		name: "type:LoadBalancer_single_port_unspecified_gateServiceLBNodePortControl:off_alloc:true",
+		name: "type:LoadBalancer_single_port_unspecified:on_alloc:true",
 		svc: svctest.MakeService("foo",
 			svctest.SetTypeLoadBalancer,
 			svctest.SetAllocateLoadBalancerNodePorts(true)),
-		gateServiceLBNodePortControl: false,
-		expectNodePorts:              true,
+		expectNodePorts: true,
 	}, {
-		// When the ServiceLBNodePortControl gate is locked, this can be removed.
-		name: "type:LoadBalancer_single_port_specified_gateServiceLBNodePortControl:off",
-		svc: svctest.MakeService("foo",
-			svctest.SetTypeLoadBalancer, svctest.SetUniqueNodePorts),
-		gateServiceLBNodePortControl: false,
-		expectNodePorts:              true,
-	}, {
-		// When the ServiceLBNodePortControl gate is locked, this can be removed.
-		name: "type:LoadBalancer_multiport_unspecified_gateServiceLBNodePortControl:off",
-		svc: svctest.MakeService("foo",
-			svctest.SetTypeLoadBalancer,
-			svctest.SetPorts(
-				svctest.MakeServicePort("p", 80, intstr.FromInt(80), api.ProtocolTCP),
-				svctest.MakeServicePort("q", 443, intstr.FromInt(443), api.ProtocolTCP))),
-		gateServiceLBNodePortControl: false,
-		expectNodePorts:              true,
-	}, {
-		// When the ServiceLBNodePortControl gate is locked, this can be removed.
-		name: "type:LoadBalancer_multiport_specified_gateServiceLBNodePortControl:off",
-		svc: svctest.MakeService("foo",
-			svctest.SetTypeLoadBalancer,
-			svctest.SetPorts(
-				svctest.MakeServicePort("p", 80, intstr.FromInt(80), api.ProtocolTCP),
-				svctest.MakeServicePort("q", 443, intstr.FromInt(443), api.ProtocolTCP)),
-			svctest.SetUniqueNodePorts),
-		gateServiceLBNodePortControl: false,
-		expectNodePorts:              true,
-	}, {
-		name: "type:LoadBalancer_single_port_unspecified_gateServiceLBNodePortControl:on_alloc:false",
-		svc: svctest.MakeService("foo",
-			svctest.SetTypeLoadBalancer,
-			svctest.SetAllocateLoadBalancerNodePorts(false)),
-		gateServiceLBNodePortControl: true,
-		expectNodePorts:              false,
-	}, {
-		name: "type:LoadBalancer_single_port_unspecified_gateServiceLBNodePortControl:on_alloc:true",
-		svc: svctest.MakeService("foo",
-			svctest.SetTypeLoadBalancer,
-			svctest.SetAllocateLoadBalancerNodePorts(true)),
-		gateServiceLBNodePortControl: true,
-		expectNodePorts:              true,
-	}, {
-		name: "type:LoadBalancer_single_port_specified_gateServiceLBNodePortControl:on_alloc:false",
+		name: "type:LoadBalancer_single_port_specified:on_alloc:false",
 		svc: svctest.MakeService("foo",
 			svctest.SetTypeLoadBalancer,
 			svctest.SetUniqueNodePorts,
 			svctest.SetAllocateLoadBalancerNodePorts(false)),
-		gateServiceLBNodePortControl: true,
-		expectNodePorts:              true,
+		expectNodePorts: true,
 	}, {
-		name: "type:LoadBalancer_single_port_specified_gateServiceLBNodePortControl:on_alloc:true",
+		name: "type:LoadBalancer_single_port_specified:on_alloc:true",
 		svc: svctest.MakeService("foo",
 			svctest.SetTypeLoadBalancer,
 			svctest.SetUniqueNodePorts,
 			svctest.SetAllocateLoadBalancerNodePorts(true)),
-		gateServiceLBNodePortControl: true,
-		expectNodePorts:              true,
+		expectNodePorts: true,
 	}, {
-		name: "type:LoadBalancer_multiport_unspecified_gateServiceLBNodePortControl:on_alloc:false",
+		name: "type:LoadBalancer_multiport_unspecified:on_alloc:false",
 		svc: svctest.MakeService("foo",
 			svctest.SetTypeLoadBalancer,
 			svctest.SetPorts(
 				svctest.MakeServicePort("p", 80, intstr.FromInt(80), api.ProtocolTCP),
 				svctest.MakeServicePort("q", 443, intstr.FromInt(443), api.ProtocolTCP)),
 			svctest.SetAllocateLoadBalancerNodePorts(false)),
-		gateServiceLBNodePortControl: true,
-		expectNodePorts:              false,
+		expectNodePorts: false,
 	}, {
-		name: "type:LoadBalancer_multiport_unspecified_gateServiceLBNodePortControl:on_alloc:true",
+		name: "type:LoadBalancer_multiport_unspecified:on_alloc:true",
 		svc: svctest.MakeService("foo",
 			svctest.SetTypeLoadBalancer,
 			svctest.SetPorts(
 				svctest.MakeServicePort("p", 80, intstr.FromInt(80), api.ProtocolTCP),
 				svctest.MakeServicePort("q", 443, intstr.FromInt(443), api.ProtocolTCP)),
 			svctest.SetAllocateLoadBalancerNodePorts(true)),
-		gateServiceLBNodePortControl: true,
-		expectNodePorts:              true,
+		expectNodePorts: true,
 	}, {
-		name: "type:LoadBalancer_multiport_specified_gateServiceLBNodePortControl:on_alloc:false",
+		name: "type:LoadBalancer_multiport_specified:on_alloc:false",
 		svc: svctest.MakeService("foo",
 			svctest.SetTypeLoadBalancer,
 			svctest.SetPorts(
@@ -6494,10 +6260,9 @@ func TestCreateInitNodePorts(t *testing.T) {
 				svctest.MakeServicePort("q", 443, intstr.FromInt(443), api.ProtocolTCP)),
 			svctest.SetUniqueNodePorts,
 			svctest.SetAllocateLoadBalancerNodePorts(false)),
-		gateServiceLBNodePortControl: true,
-		expectNodePorts:              true,
+		expectNodePorts: true,
 	}, {
-		name: "type:LoadBalancer_multiport_specified_gateServiceLBNodePortControl:on_alloc:true",
+		name: "type:LoadBalancer_multiport_specified:on_alloc:true",
 		svc: svctest.MakeService("foo",
 			svctest.SetTypeLoadBalancer,
 			svctest.SetPorts(
@@ -6505,8 +6270,7 @@ func TestCreateInitNodePorts(t *testing.T) {
 				svctest.MakeServicePort("q", 443, intstr.FromInt(443), api.ProtocolTCP)),
 			svctest.SetUniqueNodePorts,
 			svctest.SetAllocateLoadBalancerNodePorts(true)),
-		gateServiceLBNodePortControl: true,
-		expectNodePorts:              true,
+		expectNodePorts: true,
 	}, {
 		name: "type:LoadBalancer_multiport_same",
 		svc: svctest.MakeService("foo",
@@ -6594,7 +6358,6 @@ func TestCreateInitNodePorts(t *testing.T) {
 	defer storage.Store.DestroyFunc()
 
 	for _, tc := range testCases {
-		defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ServiceLBNodePortControl, tc.gateServiceLBNodePortControl)()
 		defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MixedProtocolLBService, tc.gateMixedProtocolLBService)()
 
 		t.Run(tc.name, func(t *testing.T) {
@@ -6673,47 +6436,38 @@ func TestCreateSkipsAllocationsForHeadless(t *testing.T) {
 	testCases := []struct {
 		name            string
 		clusterFamilies []api.IPFamily
-		enableDualStack bool
 		svc             *api.Service
 		expectError     bool
 	}{{
-		name:            "singlestack:v4_gate:off",
+		name:            "singlestack:v4",
 		clusterFamilies: []api.IPFamily{api.IPv4Protocol},
-		enableDualStack: false,
 		svc:             svctest.MakeService("foo"),
 	}, {
-		name:            "singlestack:v6_gate:on",
+		name:            "singlestack:v6",
 		clusterFamilies: []api.IPFamily{api.IPv6Protocol},
-		enableDualStack: true,
 		svc:             svctest.MakeService("foo"),
 	}, {
-		name:            "dualstack:v4v6_gate:off",
+		name:            "dualstack:v4v6",
 		clusterFamilies: []api.IPFamily{api.IPv4Protocol, api.IPv6Protocol},
-		enableDualStack: false,
 		svc:             svctest.MakeService("foo"),
 	}, {
-		name:            "dualstack:v6v4_gate:on",
+		name:            "dualstack:v6v4",
 		clusterFamilies: []api.IPFamily{api.IPv6Protocol, api.IPv4Protocol},
-		enableDualStack: true,
 		svc:             svctest.MakeService("foo"),
 	}, {
-		name:            "singlestack:v4_gate:off_type:NodePort",
+		name:            "singlestack:v4_type:NodePort",
 		clusterFamilies: []api.IPFamily{api.IPv4Protocol},
-		enableDualStack: false,
 		svc:             svctest.MakeService("foo", svctest.SetTypeNodePort),
 		expectError:     true,
 	}, {
-		name:            "singlestack:v6_gate:on_type:LoadBalancer",
+		name:            "singlestack:v6_type:LoadBalancer",
 		clusterFamilies: []api.IPFamily{api.IPv6Protocol},
-		enableDualStack: true,
 		svc:             svctest.MakeService("foo", svctest.SetTypeLoadBalancer),
 		expectError:     true,
 	}}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, tc.enableDualStack)()
-
 			storage, _, server := newStorage(t, tc.clusterFamilies)
 			defer server.Terminate(t)
 			defer storage.Store.DestroyFunc()
@@ -6749,54 +6503,43 @@ func TestCreateDryRun(t *testing.T) {
 	testCases := []struct {
 		name            string
 		clusterFamilies []api.IPFamily
-		enableDualStack bool
 		svc             *api.Service
 	}{{
-		name:            "singlestack:v4_gate:off_clusterip:unset",
+		name:            "singlestack:v4_clusterip:unset",
 		clusterFamilies: []api.IPFamily{api.IPv4Protocol},
-		enableDualStack: false,
 		svc:             svctest.MakeService("foo"),
 	}, {
-		name:            "singlestack:v4_gate:off_clusterip:set",
+		name:            "singlestack:v4_clusterip:set",
 		clusterFamilies: []api.IPFamily{api.IPv4Protocol},
-		enableDualStack: false,
 		svc:             svctest.MakeService("foo", svctest.SetClusterIPs("10.0.0.1")),
 	}, {
-		name:            "singlestack:v6_gate:on_clusterip:unset",
+		name:            "singlestack:v6_clusterip:unset",
 		clusterFamilies: []api.IPFamily{api.IPv6Protocol},
-		enableDualStack: true,
 		svc:             svctest.MakeService("foo"),
 	}, {
-		name:            "singlestack:v6_gate:on_clusterip:set",
+		name:            "singlestack:v6_clusterip:set",
 		clusterFamilies: []api.IPFamily{api.IPv6Protocol},
-		enableDualStack: true,
 		svc:             svctest.MakeService("foo", svctest.SetClusterIPs("2000::1")),
 	}, {
-		name:            "dualstack:v4v6_gate:on_clusterip:unset",
+		name:            "dualstack:v4v6_clusterip:unset",
 		clusterFamilies: []api.IPFamily{api.IPv4Protocol, api.IPv6Protocol},
-		enableDualStack: true,
 		svc:             svctest.MakeService("foo", svctest.SetIPFamilyPolicy(api.IPFamilyPolicyPreferDualStack)),
 	}, {
-		name:            "dualstack:v4v6_gate:on_clusterip:set",
+		name:            "dualstack:v4v6_clusterip:set",
 		clusterFamilies: []api.IPFamily{api.IPv4Protocol, api.IPv6Protocol},
-		enableDualStack: true,
 		svc:             svctest.MakeService("foo", svctest.SetIPFamilyPolicy(api.IPFamilyPolicyPreferDualStack), svctest.SetClusterIPs("10.0.0.1", "2000::1")),
 	}, {
-		name:            "singlestack:v4_gate:off_type:NodePort_nodeport:unset",
+		name:            "singlestack:v4_type:NodePort_nodeport:unset",
 		clusterFamilies: []api.IPFamily{api.IPv4Protocol},
-		enableDualStack: false,
 		svc:             svctest.MakeService("foo", svctest.SetTypeNodePort),
 	}, {
-		name:            "singlestack:v4_gate:on_type:LoadBalancer_nodePort:set",
+		name:            "singlestack:v4_type:LoadBalancer_nodePort:set",
 		clusterFamilies: []api.IPFamily{api.IPv4Protocol},
-		enableDualStack: true,
 		svc:             svctest.MakeService("foo", svctest.SetTypeLoadBalancer, svctest.SetUniqueNodePorts),
 	}}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, tc.enableDualStack)()
-
 			storage, _, server := newStorage(t, tc.clusterFamilies)
 			defer server.Terminate(t)
 			defer storage.Store.DestroyFunc()
@@ -6829,9 +6572,6 @@ func TestCreateDryRun(t *testing.T) {
 
 func TestDeleteWithFinalizer(t *testing.T) {
 	svcName := "foo"
-
-	// This test is ONLY with the gate enabled.
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, true)()
 
 	storage, _, server := newStorage(t, []api.IPFamily{api.IPv4Protocol, api.IPv6Protocol})
 	defer server.Terminate(t)
@@ -6906,33 +6646,29 @@ func TestDeleteWithFinalizer(t *testing.T) {
 // Prove that a dry-run delete doesn't actually deallocate IPs or ports.
 func TestDeleteDryRun(t *testing.T) {
 	testCases := []struct {
-		name            string
-		enableDualStack bool
-		svc             *api.Service
-	}{{
-		name:            "gate:off",
-		enableDualStack: false,
-		svc: svctest.MakeService("foo",
-			svctest.SetTypeLoadBalancer,
-			svctest.SetExternalTrafficPolicy(api.ServiceExternalTrafficPolicyTypeLocal)),
-	}, {
-		name:            "gate:on",
-		enableDualStack: true,
-		svc: svctest.MakeService("foo",
-			svctest.SetTypeLoadBalancer,
-			svctest.SetExternalTrafficPolicy(api.ServiceExternalTrafficPolicyTypeLocal)),
-	}}
+		name string
+		svc  *api.Service
+	}{
+		{
+			name: "v4",
+			svc: svctest.MakeService("foo",
+				svctest.SetTypeLoadBalancer,
+				svctest.SetIPFamilies(api.IPv4Protocol),
+				svctest.SetExternalTrafficPolicy(api.ServiceExternalTrafficPolicyTypeLocal)),
+		},
+		{
+			name: "v4v6",
+			svc: svctest.MakeService("foo",
+				svctest.SetTypeLoadBalancer,
+				svctest.SetIPFamilyPolicy(api.IPFamilyPolicyRequireDualStack),
+				svctest.SetIPFamilies(api.IPv4Protocol, api.IPv6Protocol),
+				svctest.SetExternalTrafficPolicy(api.ServiceExternalTrafficPolicyTypeLocal)),
+		}}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, tc.enableDualStack)()
 
-			families := []api.IPFamily{api.IPv4Protocol}
-			if tc.enableDualStack {
-				families = append(families, api.IPv6Protocol)
-			}
-
-			storage, _, server := newStorage(t, families)
+			storage, _, server := newStorage(t, tc.svc.Spec.IPFamilies)
 			defer server.Terminate(t)
 			defer storage.Store.DestroyFunc()
 
@@ -11652,31 +11388,16 @@ func TestFeatureInternalTrafficPolicy(t *testing.T) {
 	}
 
 	testCases := []cudTestCase{{
-		name: "ExternalName_policy:none-ExternalName_policy:Local",
+		name: "ExternalName_policy:none-ExternalName_policy:none",
 		create: svcTestCase{
 			svc: svctest.MakeService("foo",
 				svctest.SetTypeExternalName),
-			prove: prove(proveITP(api.ServiceInternalTrafficPolicyCluster)),
+			prove: prove(proveITP("")),
 		},
 		update: svcTestCase{
 			svc: svctest.MakeService("foo",
-				svctest.SetTypeExternalName,
-				svctest.SetInternalTrafficPolicy(api.ServiceInternalTrafficPolicyLocal)),
-			prove: prove(proveITP(api.ServiceInternalTrafficPolicyLocal)),
-		},
-	}, {
-		name: "ExternalName_policy:Cluster-ExternalName_policy:Local",
-		create: svcTestCase{
-			svc: svctest.MakeService("foo",
-				svctest.SetTypeExternalName,
-				svctest.SetInternalTrafficPolicy(api.ServiceInternalTrafficPolicyCluster)),
-			prove: prove(proveITP(api.ServiceInternalTrafficPolicyCluster)),
-		},
-		update: svcTestCase{
-			svc: svctest.MakeService("foo",
-				svctest.SetTypeExternalName,
-				svctest.SetInternalTrafficPolicy(api.ServiceInternalTrafficPolicyLocal)),
-			prove: prove(proveITP(api.ServiceInternalTrafficPolicyLocal)),
+				svctest.SetTypeExternalName),
+			prove: prove(proveITP("")),
 		},
 	}, {
 		name: "ClusterIP_policy:none-ClusterIP_policy:Local",

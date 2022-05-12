@@ -20,16 +20,14 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/networking"
-	"k8s.io/kubernetes/pkg/features"
 	utilpointer "k8s.io/utils/pointer"
 )
 
@@ -460,6 +458,138 @@ func TestValidateNetworkPolicyUpdate(t *testing.T) {
 			t.Errorf("expected failure: %s", testName)
 		}
 	}
+}
+
+func TestValidateNetworkPolicyStatusUpdate(t *testing.T) {
+
+	type netpolStatusCases struct {
+		obj          networking.NetworkPolicyStatus
+		expectedErrs field.ErrorList
+	}
+
+	testCases := map[string]netpolStatusCases{
+		"valid conditions": {
+			obj: networking.NetworkPolicyStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(networking.NetworkPolicyConditionStatusAccepted),
+						Status: metav1.ConditionTrue,
+						LastTransitionTime: metav1.Time{
+							Time: time.Now().Add(-5 * time.Minute),
+						},
+						Reason:             "RuleApplied",
+						Message:            "rule was successfully applied",
+						ObservedGeneration: 2,
+					},
+					{
+						Type:   string(networking.NetworkPolicyConditionStatusFailure),
+						Status: metav1.ConditionFalse,
+						LastTransitionTime: metav1.Time{
+							Time: time.Now().Add(-5 * time.Minute),
+						},
+						Reason:             "RuleApplied",
+						Message:            "no error was found",
+						ObservedGeneration: 2,
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{},
+		},
+		"duplicate type": {
+			obj: networking.NetworkPolicyStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(networking.NetworkPolicyConditionStatusAccepted),
+						Status: metav1.ConditionTrue,
+						LastTransitionTime: metav1.Time{
+							Time: time.Now().Add(-5 * time.Minute),
+						},
+						Reason:             "RuleApplied",
+						Message:            "rule was successfully applied",
+						ObservedGeneration: 2,
+					},
+					{
+						Type:   string(networking.NetworkPolicyConditionStatusAccepted),
+						Status: metav1.ConditionFalse,
+						LastTransitionTime: metav1.Time{
+							Time: time.Now().Add(-5 * time.Minute),
+						},
+						Reason:             string(networking.NetworkPolicyConditionReasonFeatureNotSupported),
+						Message:            "endport is not supported",
+						ObservedGeneration: 2,
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{field.Duplicate(field.NewPath("status").Child("conditions").Index(1).Child("type"),
+				string(networking.NetworkPolicyConditionStatusAccepted))},
+		},
+		"invalid generation": {
+			obj: networking.NetworkPolicyStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(networking.NetworkPolicyConditionStatusAccepted),
+						Status: metav1.ConditionTrue,
+						LastTransitionTime: metav1.Time{
+							Time: time.Now().Add(-5 * time.Minute),
+						},
+						Reason:             "RuleApplied",
+						Message:            "rule was successfully applied",
+						ObservedGeneration: -1,
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("status").Child("conditions").Index(0).Child("observedGeneration"),
+				int64(-1), "must be greater than or equal to zero")},
+		},
+		"invalid null transition time": {
+			obj: networking.NetworkPolicyStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(networking.NetworkPolicyConditionStatusAccepted),
+						Status:             metav1.ConditionTrue,
+						Reason:             "RuleApplied",
+						Message:            "rule was successfully applied",
+						ObservedGeneration: 3,
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{field.Required(field.NewPath("status").Child("conditions").Index(0).Child("lastTransitionTime"),
+				"must be set")},
+		},
+		"multiple condition errors": {
+			obj: networking.NetworkPolicyStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(networking.NetworkPolicyConditionStatusAccepted),
+						Status:             metav1.ConditionTrue,
+						Reason:             "RuleApplied",
+						Message:            "rule was successfully applied",
+						ObservedGeneration: -1,
+					},
+				},
+			},
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("status").Child("conditions").Index(0).Child("observedGeneration"),
+					int64(-1), "must be greater than or equal to zero"),
+				field.Required(field.NewPath("status").Child("conditions").Index(0).Child("lastTransitionTime"),
+					"must be set"),
+			},
+		},
+	}
+
+	for testName, testCase := range testCases {
+		errs := ValidateNetworkPolicyStatusUpdate(testCase.obj, networking.NetworkPolicyStatus{}, field.NewPath("status"))
+		if len(errs) != len(testCase.expectedErrs) {
+			t.Errorf("Test %s: Expected %d errors, got %d (%+v)", testName, len(testCase.expectedErrs), len(errs), errs)
+		}
+
+		for i, err := range errs {
+			if err.Error() != testCase.expectedErrs[i].Error() {
+				t.Errorf("Test %s: Expected error: %v, got %v", testName, testCase.expectedErrs[i], err)
+			}
+		}
+	}
+
 }
 
 func TestValidateIngress(t *testing.T) {
@@ -1444,9 +1574,8 @@ func TestValidateIngressClass(t *testing.T) {
 	}
 
 	testCases := map[string]struct {
-		ingressClass                    *networking.IngressClass
-		expectedErrs                    field.ErrorList
-		enableNamespaceScopedParamsGate bool
+		ingressClass *networking.IngressClass
+		expectedErrs field.ErrorList
 	}{
 		"valid name, valid controller": {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar"),
@@ -1470,25 +1599,25 @@ func TestValidateIngressClass(t *testing.T) {
 		},
 		"valid name, valid controller, valid params": {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
-				setParams(makeIngressClassParams(utilpointer.StringPtr("example.com"), "foo", "bar", nil, nil)),
+				setParams(makeIngressClassParams(utilpointer.StringPtr("example.com"), "foo", "bar", utilpointer.StringPtr("Cluster"), nil)),
 			),
 			expectedErrs: field.ErrorList{},
 		},
 		"valid name, valid controller, invalid params (no kind)": {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
-				setParams(makeIngressClassParams(utilpointer.StringPtr("example.com"), "", "bar", nil, nil)),
+				setParams(makeIngressClassParams(utilpointer.StringPtr("example.com"), "", "bar", utilpointer.StringPtr("Cluster"), nil)),
 			),
 			expectedErrs: field.ErrorList{field.Required(field.NewPath("spec.parameters.kind"), "kind is required")},
 		},
 		"valid name, valid controller, invalid params (no name)": {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
-				setParams(makeIngressClassParams(utilpointer.StringPtr("example.com"), "foo", "", nil, nil)),
+				setParams(makeIngressClassParams(utilpointer.StringPtr("example.com"), "foo", "", utilpointer.StringPtr("Cluster"), nil)),
 			),
 			expectedErrs: field.ErrorList{field.Required(field.NewPath("spec.parameters.name"), "name is required")},
 		},
 		"valid name, valid controller, invalid params (bad kind)": {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
-				setParams(makeIngressClassParams(nil, "foo/", "bar", nil, nil)),
+				setParams(makeIngressClassParams(nil, "foo/", "bar", utilpointer.StringPtr("Cluster"), nil)),
 			),
 			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec.parameters.kind"), "foo/", "may not contain '/'")},
 		},
@@ -1496,7 +1625,6 @@ func TestValidateIngressClass(t *testing.T) {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
 				setParams(makeIngressClassParams(nil, "foo", "bar", utilpointer.StringPtr("bad-scope"), nil)),
 			),
-			enableNamespaceScopedParamsGate: true,
 			expectedErrs: field.ErrorList{field.NotSupported(field.NewPath("spec.parameters.scope"),
 				"bad-scope", []string{"Cluster", "Namespace"})},
 		},
@@ -1504,14 +1632,12 @@ func TestValidateIngressClass(t *testing.T) {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
 				setParams(makeIngressClassParams(nil, "foo", "bar", utilpointer.StringPtr("Namespace"), utilpointer.StringPtr("foo-ns"))),
 			),
-			enableNamespaceScopedParamsGate: true,
-			expectedErrs:                    field.ErrorList{},
+			expectedErrs: field.ErrorList{},
 		},
 		"valid name, valid controller, valid scope, invalid namespace": {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
 				setParams(makeIngressClassParams(nil, "foo", "bar", utilpointer.StringPtr("Namespace"), utilpointer.StringPtr("foo_ns"))),
 			),
-			enableNamespaceScopedParamsGate: true,
 			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec.parameters.namespace"), "foo_ns",
 				"a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-',"+
 					" and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', "+
@@ -1521,14 +1647,12 @@ func TestValidateIngressClass(t *testing.T) {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
 				setParams(makeIngressClassParams(nil, "foo", "bar", utilpointer.StringPtr("Cluster"), nil)),
 			),
-			enableNamespaceScopedParamsGate: true,
-			expectedErrs:                    field.ErrorList{},
+			expectedErrs: field.ErrorList{},
 		},
 		"namespace not set when scope is Namespace": {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
 				setParams(makeIngressClassParams(nil, "foo", "bar", utilpointer.StringPtr("Namespace"), nil)),
 			),
-			enableNamespaceScopedParamsGate: true,
 			expectedErrs: field.ErrorList{field.Required(field.NewPath("spec.parameters.namespace"),
 				"`parameters.scope` is set to 'Namespace'")},
 		},
@@ -1536,7 +1660,6 @@ func TestValidateIngressClass(t *testing.T) {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
 				setParams(makeIngressClassParams(nil, "foo", "bar", utilpointer.StringPtr("Cluster"), utilpointer.StringPtr("foo-ns"))),
 			),
-			enableNamespaceScopedParamsGate: true,
 			expectedErrs: field.ErrorList{field.Forbidden(field.NewPath("spec.parameters.namespace"),
 				"`parameters.scope` is set to 'Cluster'")},
 		},
@@ -1544,38 +1667,13 @@ func TestValidateIngressClass(t *testing.T) {
 			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
 				setParams(makeIngressClassParams(nil, "foo", "bar", utilpointer.StringPtr("Cluster"), utilpointer.StringPtr(""))),
 			),
-			enableNamespaceScopedParamsGate: true,
 			expectedErrs: field.ErrorList{field.Forbidden(field.NewPath("spec.parameters.namespace"),
 				"`parameters.scope` is set to 'Cluster'")},
-		},
-		"validation is performed when feature gate is disabled and scope is not empty": {
-			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
-				setParams(makeIngressClassParams(nil, "foo", "bar", utilpointer.StringPtr("bad-scope"), nil)),
-			),
-			enableNamespaceScopedParamsGate: false,
-			expectedErrs: field.ErrorList{field.NotSupported(field.NewPath("spec.parameters.scope"),
-				"bad-scope", []string{"Cluster", "Namespace"})},
-		},
-		"validation fails when feature gate is enabled and scope is not set": {
-			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
-				setParams(makeIngressClassParams(nil, "foo", "bar", nil, nil)),
-			),
-			enableNamespaceScopedParamsGate: true,
-			expectedErrs:                    field.ErrorList{field.Required(field.NewPath("spec.parameters.scope"), "")},
-		},
-		"validation is performed when feature gate is disabled and namespace is not empty": {
-			ingressClass: makeValidIngressClass("test123", "foo.co/bar",
-				setParams(makeIngressClassParams(nil, "foo", "bar", nil, utilpointer.StringPtr("foo-ns"))),
-			),
-			enableNamespaceScopedParamsGate: false,
-			expectedErrs: field.ErrorList{field.NotSupported(field.NewPath("spec.parameters.scope"),
-				"", []string{"Cluster", "Namespace"})},
 		},
 	}
 
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IngressClassNamespacedParams, testCase.enableNamespaceScopedParamsGate)()
 			errs := ValidateIngressClass(testCase.ingressClass)
 
 			if len(errs) != len(testCase.expectedErrs) {

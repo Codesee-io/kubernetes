@@ -33,7 +33,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -41,11 +40,9 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	utiltesting "k8s.io/client-go/util/testing"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	endptspkg "k8s.io/kubernetes/pkg/api/v1/endpoints"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	controllerpkg "k8s.io/kubernetes/pkg/controller"
-	"k8s.io/kubernetes/pkg/features"
 	utilnet "k8s.io/utils/net"
 	utilpointer "k8s.io/utils/pointer"
 )
@@ -66,9 +63,10 @@ func testPod(namespace string, id int, nPorts int, isReady bool, ipFamilies []v1
 	p := &v1.Pod{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1"},
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      fmt.Sprintf("pod%d", id),
-			Labels:    map[string]string{"foo": "bar"},
+			Namespace:       namespace,
+			Name:            fmt.Sprintf("pod%d", id),
+			Labels:          map[string]string{"foo": "bar"},
+			ResourceVersion: fmt.Sprint(id),
 		},
 		Spec: v1.PodSpec{
 			Containers: []v1.Container{{Ports: []v1.ContainerPort{}}},
@@ -270,7 +268,7 @@ func TestSyncEndpointsItemsPreserveNoSelector(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: ns},
 		Spec:       v1.ServiceSpec{Ports: []v1.ServicePort{{Port: 80}}},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	endpointsHandler.ValidateRequestCount(t, 0)
 }
 
@@ -294,7 +292,7 @@ func TestSyncEndpointsExistingNilSubsets(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	endpointsHandler.ValidateRequestCount(t, 0)
 }
 
@@ -318,7 +316,53 @@ func TestSyncEndpointsExistingEmptySubsets(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
+	endpointsHandler.ValidateRequestCount(t, 0)
+}
+
+func TestSyncEndpointsWithPodResourceVersionUpdateOnly(t *testing.T) {
+	ns := metav1.NamespaceDefault
+	testServer, endpointsHandler := makeTestServer(t, ns)
+	defer testServer.Close()
+	pod0 := testPod(ns, 0, 1, true, ipv4only)
+	pod1 := testPod(ns, 1, 1, false, ipv4only)
+	endpoints := newController(testServer.URL, 0*time.Second)
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{
+				{
+					IP:        pod0.Status.PodIPs[0].IP,
+					NodeName:  &emptyNodeName,
+					TargetRef: &v1.ObjectReference{Kind: "Pod", Name: pod0.Name, Namespace: ns, ResourceVersion: "1"},
+				},
+			},
+			NotReadyAddresses: []v1.EndpointAddress{
+				{
+					IP:        pod1.Status.PodIPs[0].IP,
+					NodeName:  &emptyNodeName,
+					TargetRef: &v1.ObjectReference{Kind: "Pod", Name: pod1.Name, Namespace: ns, ResourceVersion: "2"},
+				},
+			},
+			Ports: []v1.EndpointPort{{Port: 8080, Protocol: "TCP"}},
+		}},
+	})
+	endpoints.serviceStore.Add(&v1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: ns},
+		Spec: v1.ServiceSpec{
+			Selector: map[string]string{"foo": "bar"},
+			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
+		},
+	})
+	pod0.ResourceVersion = "3"
+	pod1.ResourceVersion = "4"
+	endpoints.podStore.Add(pod0)
+	endpoints.podStore.Add(pod1)
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	endpointsHandler.ValidateRequestCount(t, 0)
 }
 
@@ -334,7 +378,7 @@ func TestSyncEndpointsNewNoSubsets(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	endpointsHandler.ValidateRequestCount(t, 1)
 }
 
@@ -388,7 +432,7 @@ func TestSyncEndpointsProtocolTCP(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, TargetPort: intstr.FromInt(8080), Protocol: "TCP"}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	endpointsHandler.ValidateRequestCount(t, 1)
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
@@ -431,7 +475,7 @@ func TestSyncEndpointsHeadlessServiceLabel(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	endpointsHandler.ValidateRequestCount(t, 0)
 }
 
@@ -459,7 +503,7 @@ func TestSyncEndpointsProtocolUDP(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, TargetPort: intstr.FromInt(8080), Protocol: "UDP"}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	endpointsHandler.ValidateRequestCount(t, 1)
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
@@ -503,7 +547,7 @@ func TestSyncEndpointsProtocolSCTP(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, TargetPort: intstr.FromInt(8080), Protocol: "SCTP"}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	endpointsHandler.ValidateRequestCount(t, 1)
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
@@ -544,7 +588,7 @@ func TestSyncEndpointsItemsEmptySelectorSelectsAll(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
@@ -584,7 +628,7 @@ func TestSyncEndpointsItemsEmptySelectorSelectsAllNotReady(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
@@ -624,7 +668,7 @@ func TestSyncEndpointsItemsEmptySelectorSelectsAllMixed(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
@@ -668,7 +712,7 @@ func TestSyncEndpointsItemsPreexisting(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
@@ -711,7 +755,7 @@ func TestSyncEndpointsItemsPreexistingIdentical(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	endpointsHandler.ValidateRequestCount(t, 0)
 }
 
@@ -733,7 +777,7 @@ func TestSyncEndpointsItems(t *testing.T) {
 			},
 		},
 	})
-	endpoints.syncService("other/foo")
+	endpoints.syncService(context.TODO(), "other/foo")
 
 	expectedSubsets := []v1.EndpointSubset{{
 		Addresses: []v1.EndpointAddress{
@@ -781,7 +825,7 @@ func TestSyncEndpointsItemsWithLabels(t *testing.T) {
 			},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	expectedSubsets := []v1.EndpointSubset{{
 		Addresses: []v1.EndpointAddress{
@@ -840,7 +884,7 @@ func TestSyncEndpointsItemsPreexistingLabelsChange(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	serviceLabels[v1.IsHeadlessService] = ""
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
@@ -894,7 +938,7 @@ func TestWaitsForAllInformersToBeSynced2(t *testing.T) {
 			endpoints.workerLoopPeriod = 10 * time.Millisecond
 			stopCh := make(chan struct{})
 			defer close(stopCh)
-			go endpoints.Run(1, stopCh)
+			go endpoints.Run(context.TODO(), 1)
 
 			// cache.WaitForNamedCacheSync has a 100ms poll period, and the endpoints worker has a 10ms period.
 			// To ensure we get all updates, including unexpected ones, we need to wait at least as long as
@@ -940,7 +984,7 @@ func TestSyncEndpointsHeadlessService(t *testing.T) {
 	}
 	originalService := service.DeepCopy()
 	endpoints.serviceStore.Add(service)
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
@@ -987,7 +1031,7 @@ func TestSyncEndpointsItemsExcludeNotReadyPodsWithRestartPolicyNeverAndPhaseFail
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
@@ -1026,7 +1070,7 @@ func TestSyncEndpointsItemsExcludeNotReadyPodsWithRestartPolicyNeverAndPhaseSucc
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
@@ -1065,7 +1109,7 @@ func TestSyncEndpointsItemsExcludeNotReadyPodsWithRestartPolicyOnFailureAndPhase
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
@@ -1094,7 +1138,7 @@ func TestSyncEndpointsHeadlessWithoutPort(t *testing.T) {
 		},
 	})
 	addPods(endpoints.podStore, ns, 1, 1, 0, ipv4only)
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	endpointsHandler.ValidateRequestCount(t, 1)
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1207,209 +1251,154 @@ func TestPodToEndpointAddressForService(t *testing.T) {
 	ipv6 := v1.IPv6Protocol
 
 	testCases := []struct {
-		name string
-
-		enableDualStack bool
-		ipFamilies      []v1.IPFamily
-
-		service v1.Service
-
+		name                   string
+		ipFamilies             []v1.IPFamily
+		service                v1.Service
 		expectedEndpointFamily v1.IPFamily
 		expectError            bool
 	}{
 		{
-			name: "v4 service, in a single stack cluster",
-
-			enableDualStack: false,
-			ipFamilies:      ipv4only,
-
+			name:       "v4 service, in a single stack cluster",
+			ipFamilies: ipv4only,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP: "10.0.0.1",
 				},
 			},
-
 			expectedEndpointFamily: ipv4,
 		},
 		{
-			name: "v4 service, in a dual stack cluster",
-
-			enableDualStack: true,
-			ipFamilies:      ipv4ipv6,
-
+			name:       "v4 service, in a dual stack cluster",
+			ipFamilies: ipv4ipv6,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP: "10.0.0.1",
 				},
 			},
-
 			expectedEndpointFamily: ipv4,
 		},
 		{
-			name: "v4 service, in a dual stack ipv6-primary cluster",
-
-			enableDualStack: true,
-			ipFamilies:      ipv6ipv4,
-
+			name:       "v4 service, in a dual stack ipv6-primary cluster",
+			ipFamilies: ipv6ipv4,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP: "10.0.0.1",
 				},
 			},
-
 			expectedEndpointFamily: ipv4,
 		},
 		{
-			name: "v4 headless service, in a single stack cluster",
-
-			enableDualStack: false,
-			ipFamilies:      ipv4only,
-
+			name:       "v4 headless service, in a single stack cluster",
+			ipFamilies: ipv4only,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP: v1.ClusterIPNone,
 				},
 			},
-
 			expectedEndpointFamily: ipv4,
 		},
 		{
-			name: "v4 headless service, in a dual stack cluster",
-
-			enableDualStack: false,
-			ipFamilies:      ipv4ipv6,
-
+			name:       "v4 headless service, in a dual stack cluster",
+			ipFamilies: ipv4ipv6,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP:  v1.ClusterIPNone,
 					IPFamilies: []v1.IPFamily{v1.IPv4Protocol},
 				},
 			},
-
 			expectedEndpointFamily: ipv4,
 		},
 		{
-			name: "v4 legacy headless service, in a dual stack cluster",
-
-			enableDualStack: false,
-			ipFamilies:      ipv4ipv6,
-
+			name:       "v4 legacy headless service, in a dual stack cluster",
+			ipFamilies: ipv4ipv6,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP: v1.ClusterIPNone,
 				},
 			},
-
 			expectedEndpointFamily: ipv4,
 		},
 		{
-			name: "v4 legacy headless service, in a dual stack ipv6-primary cluster",
-
-			enableDualStack: true,
-			ipFamilies:      ipv6ipv4,
-
+			name:       "v4 legacy headless service, in a dual stack ipv6-primary cluster",
+			ipFamilies: ipv6ipv4,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP: v1.ClusterIPNone,
 				},
 			},
-
 			expectedEndpointFamily: ipv6,
 		},
 		{
-			name: "v6 service, in a dual stack cluster",
-
-			enableDualStack: true,
-			ipFamilies:      ipv4ipv6,
-
+			name:       "v6 service, in a dual stack cluster",
+			ipFamilies: ipv4ipv6,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP: "3000::1",
 				},
 			},
-
 			expectedEndpointFamily: ipv6,
 		},
 		{
-			name: "v6 headless service, in a single stack cluster",
-
-			enableDualStack: false,
-			ipFamilies:      ipv6only,
-
+			name:       "v6 headless service, in a single stack cluster",
+			ipFamilies: ipv6only,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP: v1.ClusterIPNone,
 				},
 			},
-
 			expectedEndpointFamily: ipv6,
 		},
 		{
-			name: "v6 headless service, in a dual stack cluster (connected to a new api-server)",
-
-			enableDualStack: true,
-			ipFamilies:      ipv4ipv6,
-
+			name:       "v6 headless service, in a dual stack cluster (connected to a new api-server)",
+			ipFamilies: ipv4ipv6,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP:  v1.ClusterIPNone,
 					IPFamilies: []v1.IPFamily{v1.IPv6Protocol}, // <- set by a api-server defaulting logic
 				},
 			},
-
 			expectedEndpointFamily: ipv6,
 		},
 		{
-			name: "v6 legacy headless service, in a dual stack cluster  (connected to a old api-server)",
-
-			enableDualStack: false,
-			ipFamilies:      ipv4ipv6,
-
+			name:       "v6 legacy headless service, in a dual stack cluster  (connected to a old api-server)",
+			ipFamilies: ipv4ipv6,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP: v1.ClusterIPNone, // <- families are not set by api-server
 				},
 			},
-
 			expectedEndpointFamily: ipv4,
 		},
-
 		// in reality this is a misconfigured cluster
 		// i.e user is not using dual stack and have PodIP == v4 and ServiceIP==v6
-		// we are testing that we will keep producing the expected behavior
+		// previously controller could assign wrong ip to endpoint address
+		// with gate removed. this is no longer the case. this is *not* behavior change
+		// because previously things would have failed in kube-proxy anyway (due to editing wrong iptables).
 		{
-			name: "v6 service, in a v4 only cluster. dual stack disabled",
-
-			enableDualStack: false,
-			ipFamilies:      ipv4only,
-
+			name:       "v6 service, in a v4 only cluster.",
+			ipFamilies: ipv4only,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP: "3000::1",
 				},
 			},
-
+			expectError:            true,
 			expectedEndpointFamily: ipv4,
 		},
 		// but this will actually give an error
 		{
-			name: "v6 service, in a v4 only cluster - dual stack enabled",
-
-			enableDualStack: true,
-			ipFamilies:      ipv4only,
-
+			name:       "v6 service, in a v4 only cluster",
+			ipFamilies: ipv4only,
 			service: v1.Service{
 				Spec: v1.ServiceSpec{
 					ClusterIP: "3000::1",
 				},
 			},
-
 			expectError: true,
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.IPv6DualStack, tc.enableDualStack)()
 			podStore := cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
 			ns := "test"
 			addPods(podStore, ns, 1, 1, 0, tc.ipFamilies)
@@ -1442,16 +1431,16 @@ func TestPodToEndpointAddressForService(t *testing.T) {
 				t.Fatalf("TargetRef.Kind: expected: %s, got: %s", "Pod", epa.TargetRef.Kind)
 			}
 			if epa.TargetRef.Namespace != pod.ObjectMeta.Namespace {
-				t.Fatalf("TargetRef.Kind: expected: %s, got: %s", pod.ObjectMeta.Namespace, epa.TargetRef.Namespace)
+				t.Fatalf("TargetRef.Namespace: expected: %s, got: %s", pod.ObjectMeta.Namespace, epa.TargetRef.Namespace)
 			}
 			if epa.TargetRef.Name != pod.ObjectMeta.Name {
-				t.Fatalf("TargetRef.Kind: expected: %s, got: %s", pod.ObjectMeta.Name, epa.TargetRef.Name)
+				t.Fatalf("TargetRef.Name: expected: %s, got: %s", pod.ObjectMeta.Name, epa.TargetRef.Name)
 			}
 			if epa.TargetRef.UID != pod.ObjectMeta.UID {
-				t.Fatalf("TargetRef.Kind: expected: %s, got: %s", pod.ObjectMeta.UID, epa.TargetRef.UID)
+				t.Fatalf("TargetRef.UID: expected: %s, got: %s", pod.ObjectMeta.UID, epa.TargetRef.UID)
 			}
-			if epa.TargetRef.ResourceVersion != pod.ObjectMeta.ResourceVersion {
-				t.Fatalf("TargetRef.Kind: expected: %s, got: %s", pod.ObjectMeta.ResourceVersion, epa.TargetRef.ResourceVersion)
+			if epa.TargetRef.ResourceVersion != "" {
+				t.Fatalf("TargetRef.ResourceVersion: expected empty, got: %s", epa.TargetRef.ResourceVersion)
 			}
 		})
 	}
@@ -1482,7 +1471,7 @@ func TestLastTriggerChangeTimeAnnotation(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, TargetPort: intstr.FromInt(8080), Protocol: "TCP"}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	endpointsHandler.ValidateRequestCount(t, 1)
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
@@ -1532,7 +1521,7 @@ func TestLastTriggerChangeTimeAnnotation_AnnotationOverridden(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, TargetPort: intstr.FromInt(8080), Protocol: "TCP"}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	endpointsHandler.ValidateRequestCount(t, 1)
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
@@ -1583,7 +1572,7 @@ func TestLastTriggerChangeTimeAnnotation_AnnotationCleared(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, TargetPort: intstr.FromInt(8080), Protocol: "TCP"}},
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 
 	endpointsHandler.ValidateRequestCount(t, 1)
 	data := runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(v1.SchemeGroupVersion), &v1.Endpoints{
@@ -1712,7 +1701,7 @@ func TestPodUpdatesBatching(t *testing.T) {
 			endpoints.endpointsSynced = alwaysReady
 			endpoints.workerLoopPeriod = 10 * time.Millisecond
 
-			go endpoints.Run(1, stopCh)
+			go endpoints.Run(context.TODO(), 1)
 
 			addPods(endpoints.podStore, ns, tc.podsCount, 1, 0, ipv4only)
 
@@ -1835,7 +1824,7 @@ func TestPodAddsBatching(t *testing.T) {
 			endpoints.endpointsSynced = alwaysReady
 			endpoints.workerLoopPeriod = 10 * time.Millisecond
 
-			go endpoints.Run(1, stopCh)
+			go endpoints.Run(context.TODO(), 1)
 
 			endpoints.serviceStore.Add(&v1.Service{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: ns},
@@ -1957,7 +1946,7 @@ func TestPodDeleteBatching(t *testing.T) {
 			endpoints.endpointsSynced = alwaysReady
 			endpoints.workerLoopPeriod = 10 * time.Millisecond
 
-			go endpoints.Run(1, stopCh)
+			go endpoints.Run(context.TODO(), 1)
 
 			addPods(endpoints.podStore, ns, tc.podsCount, 1, 0, ipv4only)
 
@@ -2001,7 +1990,7 @@ func TestSyncEndpointsServiceNotFound(t *testing.T) {
 			ResourceVersion: "1",
 		},
 	})
-	endpoints.syncService(ns + "/foo")
+	endpoints.syncService(context.TODO(), ns+"/foo")
 	endpointsHandler.ValidateRequestCount(t, 1)
 	endpointsHandler.ValidateRequest(t, "/api/v1/namespaces/"+ns+"/endpoints/foo", "DELETE", nil)
 }
@@ -2127,7 +2116,7 @@ func TestSyncServiceOverCapacity(t *testing.T) {
 			c.endpointsStore.Add(endpoints)
 			client.CoreV1().Endpoints(ns).Create(context.TODO(), endpoints, metav1.CreateOptions{})
 
-			c.syncService(fmt.Sprintf("%s/%s", ns, svc.Name))
+			c.syncService(context.TODO(), fmt.Sprintf("%s/%s", ns, svc.Name))
 
 			actualEndpoints, err := client.CoreV1().Endpoints(ns).Get(context.TODO(), endpoints.Name, metav1.GetOptions{})
 			if err != nil {
@@ -2286,7 +2275,7 @@ func TestMultipleServiceChanges(t *testing.T) {
 	*controller = *newController(testServer.URL, 0*time.Second)
 	addPods(controller.podStore, ns, 1, 1, 0, ipv4only)
 
-	go func() { controller.Run(1, stopChan) }()
+	go func() { controller.Run(context.TODO(), 1) }()
 
 	svc := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: ns},

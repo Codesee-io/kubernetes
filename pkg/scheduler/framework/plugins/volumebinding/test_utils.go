@@ -22,7 +22,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	pvutil "k8s.io/kubernetes/pkg/controller/volume/persistentvolume/util"
+	"k8s.io/component-helpers/storage/volume"
 	"k8s.io/utils/pointer"
 )
 
@@ -122,7 +122,7 @@ func makePVC(name string, storageClassName string) pvcBuilder {
 
 func (pvcb pvcBuilder) withBoundPV(pvName string) pvcBuilder {
 	pvcb.PersistentVolumeClaim.Spec.VolumeName = pvName
-	metav1.SetMetaDataAnnotation(&pvcb.PersistentVolumeClaim.ObjectMeta, pvutil.AnnBindCompleted, "true")
+	metav1.SetMetaDataAnnotation(&pvcb.PersistentVolumeClaim.ObjectMeta, volume.AnnBindCompleted, "true")
 	return pvcb
 }
 
@@ -131,6 +131,13 @@ func (pvcb pvcBuilder) withRequestStorage(request resource.Quantity) pvcBuilder 
 		Requests: v1.ResourceList{
 			v1.ResourceName(v1.ResourceStorage): request,
 		},
+	}
+	return pvcb
+}
+
+func (pvcb pvcBuilder) withPhase(phase v1.PersistentVolumeClaimPhase) pvcBuilder {
+	pvcb.PersistentVolumeClaim.Status = v1.PersistentVolumeClaimStatus{
+		Phase: phase,
 	}
 	return pvcb
 }
